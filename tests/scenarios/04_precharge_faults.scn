@@ -1,0 +1,20 @@
+# Precharge failure modes.
+#
+# Getting this wrong in hardware welds the main contactor and destroys the
+# precharge resistor, so it is worth being paranoid in software. The two
+# failures that matter: the resistor goes open (link never rises), and the
+# link rises too slowly (timeout).
+
+# An open precharge resistor: the DC link never moves.
+t=0      pc_open=1
+t=100    ts=1
+t=200    expect_state=PRECHARGE expect_air_pos=0
+
+# The "is it actually rising?" check fires at 500 ms and catches this long
+# before the 5 s timeout would.
+t=700    expect_fault=PRECHARGE_NO_RISE
+t=750    expect_state=FAULT expect_air_pos=0 expect_torque_max=0
+
+# AIR+ must never have closed.
+t=1000   expect_air_pos=0
+t=5000   expect_air_pos=0

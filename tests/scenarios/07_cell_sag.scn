@@ -1,0 +1,41 @@
+# Low cell voltage: fade the torque, do not chop it.
+#
+# This one used to be a cliff -- torque went to zero the moment the minimum
+# cell crossed 3000 mV. That is the wrong shape, and the reason is physics:
+# a pack sags under load. Chop the torque and the sag recovers, so the
+# torque comes back, so it sags again. The car surges. Fading instead lets
+# the pack settle somewhere and the driver gets a slow car rather than a
+# bucking one.
+#
+# cell_derate_mv = 3300 (start easing off), cell_min_mv = 3000 (nothing left).
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+# Healthy pack at 3800 mV: full 100.0 Nm for a 50 % pedal.
+t=3400   pedal=500
+t=3600   expect_torque_min=990 expect_torque_max=1010
+
+# 3400 mV is still above the fade threshold. Nothing should happen yet --
+# this line exists because an off-by-one here would be invisible otherwise.
+t=3800   cell_mv=3400
+t=4000   expect_torque_min=990 expect_no_fault=CELL_UNDERVOLT
+
+# Halfway down the 3300-3000 band. Half torque, and now it is worth logging.
+t=4200   cell_mv=3150
+t=4400   expect_torque_min=450 expect_torque_max=550
+t=4500   expect_fault=CELL_UNDERVOLT
+
+# At the floor there is nothing left. Severity is DERATE, so the car stays
+# in DRIVE and the contactors stay closed -- a flat pack is not a reason to
+# drop the tractive system, it is a reason to stop asking it for current.
+t=5000   cell_mv=2950
+t=5300   expect_torque_max=0 expect_state=DRIVE expect_air_pos=1
+
+# Recovers on its own once the pack does. 2 s heal time on the fault.
+t=6000   cell_mv=3800
+t=6400   expect_torque_min=990
+t=8200   expect_no_fault=CELL_UNDERVOLT

@@ -1,0 +1,33 @@
+# FSAE T.4: if the two APPS channels disagree by more than 10 % of pedal
+# travel for more than 100 ms, power to the motor must be shut off.
+#
+# This is the single most important test in the repo. It is also the one you
+# can never safely run in a car, which is exactly why it lives here.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+# Driving normally at 45 % pedal, both channels agreeing.
+t=3400   pedal=450
+t=3450   expect_torque_min=1 expect_no_fault=APPS_IMPLAUSIBLE
+
+# Channel 2 starts reading wrong. Pedal is 45 % (ch1), but ch2's raw value
+# now corresponds to ~62 % -> a 17 % disagreement, well over the 10 % limit.
+t=3500   apps2_mv=2000
+
+# Must NOT have tripped yet: the rule allows up to 100 ms.
+t=3550   expect_no_fault=APPS_IMPLAUSIBLE
+
+# By 100 ms after onset it must be latched and torque must be zero.
+t=3620   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0 expect_enable=0
+
+# The latch must hold even once the sensors agree again...
+t=4000   apps2_mv=2700
+t=4200   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0
+
+# ...and only clear once the driver actually releases the pedal below 5 %.
+t=5000   pedal=0
+t=5200   expect_no_fault=APPS_IMPLAUSIBLE

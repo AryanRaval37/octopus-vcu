@@ -1,0 +1,29 @@
+# The BMS stops talking mid-drive.
+#
+# A stale battery reading that still looks plausible is more dangerous than
+# a missing one, which is why every received signal carries a timeout.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+t=3400   pedal=500
+t=3600   expect_torque_min=1
+
+# BMS goes silent. 100 ms debounce, so nothing yet at +50 ms.
+t=4000   bms_alive=0
+t=4050   expect_no_fault=BMS_TIMEOUT
+
+t=4200   expect_fault=BMS_TIMEOUT
+t=4250   expect_state=FAULT expect_torque_max=0 expect_enable=0 expect_air_pos=0
+
+# BMS comes back. This fault is non-latching, so after its 1 s heal time it
+# clears -- but the car must NOT spring back into DRIVE on its own. The
+# driver has to release the TS request and ask again.
+t=5000   bms_alive=1
+t=6200   expect_no_fault=BMS_TIMEOUT
+t=6300   expect_state=FAULT
+
+t=6500   ts=0
+t=6700   expect_state=LV_READY

@@ -1,0 +1,26 @@
+# Normal startup: LV -> precharge -> TS active -> ready-to-drive -> drive.
+# This is the happy path. If it ever fails, stop and fix it before anything else.
+
+t=0      expect_state=LV_READY
+
+# Driver asks for the tractive system. AIR- and the precharge relay close,
+# AIR+ must stay OPEN until the DC link is charged.
+t=100    ts=1
+t=150    expect_state=PRECHARGE expect_air_pos=0
+
+# 400 V pack, 400 ms RC: ~95 % takes about 1.2 s.
+t=1500   expect_state=RTD_WAIT expect_air_pos=1
+
+# Button alone is not enough — FSAE EV.10.4 requires the brake too.
+t=1600   rtd=1
+t=2000   expect_state=RTD_WAIT
+
+# Brake as well. Buzzer runs for 1.5 s, then drive.
+t=2100   brake=400
+t=3000   expect_state=RTD_WAIT
+t=3700   expect_state=DRIVE expect_enable=1
+
+# Release the brake, apply throttle, expect torque.
+t=3800   brake=0
+t=4000   pedal=500
+t=4500   expect_torque_min=1

@@ -1,0 +1,35 @@
+# FSAE EV.4 (BPPC): throttle above 25 % while the brakes are actuated must
+# cut torque, and it must stay cut until the pedal drops below 5 % -- not
+# until the driver lifts off the brake.
+#
+# Note: this is the SOFTWARE plausibility check. The BSPD is a separate
+# ANALOGUE hardware circuit and is deliberately not modelled here.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+t=3400   pedal=600
+t=3500   expect_torque_min=1
+
+# Driver brakes hard while still on the throttle.
+t=3600   brake=500
+t=3700   expect_fault=BPPC expect_torque_max=0
+
+# Releasing the brake alone must NOT restore torque.
+t=4000   brake=0
+t=4200   expect_fault=BPPC expect_torque_max=0
+
+# Lifting to 10 % is still not enough -- the threshold is 5 %.
+t=4500   pedal=100
+t=4700   expect_fault=BPPC expect_torque_max=0
+
+# Below 5 %: cleared.
+t=5000   pedal=0
+t=5200   expect_no_fault=BPPC
+
+# And torque is available again.
+t=5400   pedal=600
+t=5800   expect_torque_min=1

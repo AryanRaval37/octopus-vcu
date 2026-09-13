@@ -1,0 +1,48 @@
+# Motor overtemperature: torque fades, it does not fall off a cliff.
+#
+# This path had never run. The plant's thermal model integrated with
+# integer division at a 1 ms tick, so both temperatures sat at exactly
+# 25 C forever, so the thermal derate in torque.c never ran. Fixing
+# the model is what made this test possible, which is the argument for
+# having a plant that pushes back at all.
+#
+# derate_motor_start = 90 C, derate_motor_stop = 110 C, linear between.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+# 50 % pedal in SPORT (200.0 Nm max) is 100.0 Nm, cold.
+t=3400   pedal=500
+t=3600   expect_torque_min=990 expect_torque_max=1010
+
+# Halfway into the band: 100 C of a 90-110 C fade is half torque.
+t=4000   temp_motor=100
+t=4200   expect_torque_min=450 expect_torque_max=550
+
+# Still no fault. A derate is the system working, not the system broken --
+# OVERTEMP_MOTOR is only raised at the far end of the fade.
+t=4250   expect_no_fault=OVERTEMP_MOTOR
+
+# Deeper in: 105 C leaves a quarter.
+t=4500   temp_motor=105
+t=4700   expect_torque_min=200 expect_torque_max=300
+
+# Past the stop temperature there is nothing left, and now it is a fault.
+# Severity is DERATE, so the car stays in DRIVE -- it just cannot pull.
+t=5000   temp_motor=115
+t=5200   expect_torque_max=0
+t=5600   expect_fault=OVERTEMP_MOTOR expect_state=DRIVE
+
+# Cool it back down and the torque comes back on its own. No latch here:
+# the temperature dropping IS the evidence that the problem went away.
+t=6000   temp_motor=60
+t=6400   expect_torque_min=990
+
+# 5 s heal time, counted from when the temperature came back down, so it
+# clears at t=11000 exactly. Check a little after that rather than on the
+# boundary tick -- an assertion that lands on the exact millisecond will
+# flip the first time someone changes the tick rate.
+t=11200  expect_no_fault=OVERTEMP_MOTOR
