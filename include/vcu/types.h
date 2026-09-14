@@ -9,6 +9,16 @@
  *
  * Next: src/svc/apps.c.
  */
+
+// TODO: Design choice,
+// Either vcu_in_t should be renamed to car state or something which is a massive struct being passed around to every function that needs part of it.
+// Sounds not optimal because too much redundancy but atleast there is one car state everywhere and not split into pieces.
+// (basically equivalent to global variables)
+// Second option is make smaller structs
+// apps, bms, inverter, vcu_in etc and have separate fields in them (Possibly overlapping) being passed around to functions that need them.
+// right now vcu_in_t is also somewhere in the middle, not having all the info but also being passed around to functions like apps_step in apps.c
+
+
 #ifndef VCU_TYPES_H
 #define VCU_TYPES_H
 
