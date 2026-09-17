@@ -1,0 +1,34 @@
+# EV4.11.8: "The R2D mode must be left immediately when the SDC is opened."
+#
+# This was a real hole. The shutdown circuit was only consulted on the way
+# into precharge, so once the car was driving, the SDC could open and the
+# state machine would not notice. The inertia switch, the cockpit buttons
+# and the brake over-travel switch all live on that loop -- every one of
+# them is someone pressing "stop" and being ignored.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+t=3400   pedal=500
+t=3600   expect_torque_min=1 expect_enable=1
+
+# Somebody hits a shutdown button. No debounce on this one -- "immediately"
+# is the word the rule uses.
+t=4000   sdc=0
+t=4001   expect_fault=SDC_OPEN
+t=4010   expect_state=FAULT expect_torque_max=0 expect_enable=0
+
+# And the contactors open, because an open SDC drops the AIRs by definition.
+t=4020   expect_air_pos=0 expect_air_neg=0
+
+# Closing the circuit again must NOT restart the car on its own. EV4.11.4:
+# "Closing the SDC by any part defined in EV6.1.2 must not (re-)activate the
+# TS. Additional action must be required."
+t=5000   sdc=1
+t=6000   expect_state=FAULT
+
+# The additional action is the driver letting go of the TS request.
+t=6500   ts=0
+t=6700   expect_state=LV_READY

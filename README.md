@@ -1,15 +1,20 @@
 # Aeolus VCU
 
-Vehicle Control Unit firmware for an electric car. Targets the NXP S32K344;
-runs and is fully tested on a development machine with no hardware at all.
+Vehicle Control Unit firmware for an electric Formula Student car. Targets the
+NXP S32K344; runs and is fully tested on a development machine with no
+hardware at all.
 
 ```sh
 cmake -S . -B build && cmake --build build
-./build/run_scenarios tests/scenarios/*.scn    # the safety test suite
+./build/run_scenarios tests/scenarios/*.scn    # the safety suite
 ./build/vcu_demo                                # watch a drive cycle
+./build/vcu_demo --csv drive.csv                # ...and keep the log
 ```
 
-Requires only CMake and a C11 compiler. On macOS: `brew install cmake`.
+Requires CMake and a C11 compiler. On macOS: `brew install cmake`.
+
+**New here? Read [`docs/START-HERE.md`](docs/START-HERE.md).** It is twenty
+minutes and it puts the files in the right order.
 
 ---
 
@@ -22,178 +27,114 @@ vcu_step(&vcu, &in, &out);
 ```
 
 No clocks, no pins, no CAN, no RTOS anywhere inside it. The caller gathers
-inputs, calls `vcu_step`, and writes the outputs. That is the whole contract.
-
-Everything good about this repo falls out of that one property:
-
-- The identical code runs on your laptop and on the S32K344.
-- A test can inject a sensor failure at exactly t=3500 ms, forty times, in a
-  second. You cannot do that in a car, and those are the paths that matter.
-- Porting to different silicon means rewriting `port/`, not the VCU.
-- `git diff` on a behaviour change shows logic, not driver noise.
+inputs, calls `vcu_step`, writes the outputs. That is the whole contract, and
+everything good here falls out of it: the same code runs on a laptop and on
+the S32K344, a test can inject a sensor failure at exactly t=3500 ms, and
+porting means rewriting `board/` rather than the controller.
 
 ---
 
 ## Layout
 
+There are two kinds of code here: code that runs on your laptop, and code
+that can't.
+
 ```
-include/vcu/     public headers — the vocabulary
-src/
-  vcu.c          orchestrator: dt, fault reporting, calls the modules in order
-  app/
-    state.c      vehicle state machine + precharge sequencer
-    torque.c     pedal -> torque command, all the clamps
-    fault.c      the fault table: severity, debounce, healing, latching
-  svc/
-    apps.c       pedal acquisition + FSAE plausibility checks
-sim/
-  plant.c        crude vehicle model: DC link, rpm, temperatures
-  scenario.c     the .scn file runner
-port/
-  posix/main.c   host port — becomes the S32K344 port later
-tests/scenarios/ the test corpus
+core/              the controller. pure C. no hardware, no clock, no globals.
+  types.h          the vocabulary
+  vcu.c            one tick: sense, decide, record
+  config.c         every tunable number in the car
+  datalog.c        the flight recorder
+  sense/           "can I trust this, and what does it mean?"
+    signals.c        CAN message health: corruption, loss, delay
+    pedals.c         four sensors, two pedals, plausibility
+  decide/          "given that, what does the car do?"
+    faults.c         the fault table: severity, debounce, healing, latching
+    state.c          vehicle state machine + precharge sequencer
+    torque.c         pedal -> torque command, and every ceiling on the way
+board/             the machine. one directory per machine.
+  host/            this machine: reads the simulator instead of hardware
+  s32k3/           the real one, when the hardware arrives
+sim/               a pretend car, so the controller has something to argue with
+tests/scenarios/   the corpus
+docs/rules/        the governing rulebook
 ```
 
-**Dependency rule, enforced by review:** `src/` includes only `include/vcu/`
-and the C standard library. If a file under `src/` ever includes
-`zephyr/…`, `Flexcan_Ip.h`, or `FreeRTOS.h`, the design has broken.
+**Dependency rule, enforced by review:** `core/` includes only `core/` and
+the C standard library. If a file under `core/` ever includes `zephyr/…`,
+`Flexcan_Ip.h`, or `FreeRTOS.h`, the design has broken.
 
 ---
 
-## Reading order
+## Status
 
-1. `include/vcu/types.h` — the vocabulary. Units, states, faults.
-2. `src/svc/apps.c` — smallest and highest-consequence file here.
-3. `src/app/state.c` — the state machine.
-4. `src/app/torque.c` — read the comment at the top before changing anything.
-5. `src/app/fault.c` — the whole fault policy of the vehicle, in one table.
-6. `tests/scenarios/02_apps_disagreement.scn` — what a test looks like.
+12 scenarios, 142 checks, zero warnings under `-Werror -Wconversion` plus
+ASan and UBSan.
 
-Each of those files ends by naming the next one, so you can also just open
-`types.h` and keep going. `src/vcu.c` is the spine — one tick of the whole
-car — and is worth reading once you have seen the parts it calls.
+Implemented: the state machine and precharge sequencer, dual-redundant
+accelerator and brake sensing with the plausibility rules, CAN message health
+(corruption, loss and delay per T11.9.2.d), the fault table, the torque
+pipeline including the 80 kW / 500 A ceilings and the BMS discharge limit,
+thermal and cell derating, and datalogging.
+
+Not yet: CAN bit packing (`sig/` — generate it from a DBC with `cantools`),
+NVM for calibration, a torque map beyond linear, and the S32K3 port.
+
+Deliberately absent: **the BSPD.** Per T11.6 it is a standalone
+non-programmable circuit that opens the shutdown circuit on simultaneous hard
+braking and ≥5 kW to the motors. Implementing it in the MCU satisfies neither
+the rule nor physics — one of the failures it guards against is this MCU
+having hung. `core/config.h` has a note on keeping the software thresholds
+consistent with that board once its varistor is trimmed.
 
 ---
 
-## Scenario tests
+## Four things the compiler and the tests caught
 
-A scenario is a timeline of "set this" and "assert that":
+Left here because they are the point.
 
-```
-t=3400   pedal=450
-t=3500   apps2_mv=2000          # channel 2 drifts: 17 % disagreement
-t=3550   expect_no_fault=APPS_IMPLAUSIBLE   # 100 ms not elapsed yet
-t=3620   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0
-```
+- **A dead code path nobody noticed.** The simulator integrated temperature
+  with integer division at a 1 ms tick, so every increment truncated to zero
+  and both temperatures sat at exactly 25 °C for the life of the project. The
+  entire thermal derate had therefore never executed once. `plant.h` already
+  carried a comment warning about this exact trap for `rpm` — the same bug,
+  twelve lines apart, caught once. Fixed with a micro-degree accumulator.
 
-Inputs: `pedal` `brake` `apps1_mv` `apps2_mv` `brake_mv` `ts` `rtd` `mode`
-`dir` `bms_alive` `inv_alive` `bms_fault` `inv_fault` `soc` `cell_mv` `rpm`
-`temp_motor` `temp_inv` `pc_open`
+- **A safety hole in the shutdown path.** `shutdown_ok` was only checked on
+  the way into precharge, so once the car was driving, the shutdown circuit
+  could open and the state machine would not notice — against EV4.11.8. The
+  inertia switch, the cockpit buttons and the brake over-travel switch all
+  live on that loop. Now `08_shutdown_circuit.scn`.
 
-Assertions: `expect_state` `expect_torque_max` `expect_torque_min`
-`expect_fault` `expect_no_fault` `expect_air_pos` `expect_enable`
+- **A severity that was subtly wrong.** `APPS_IMPLAUSIBLE` opened the
+  contactors, but T11.8.8 says explicitly that deactivating the tractive
+  system is not necessary — cutting motor power is enough. Meanwhile a
+  channel going open *is* an SCS failure and T11.9.5 does want the AIRs
+  open. Two failures of one sensor, two different responses.
 
-Percentages are tenths (`pedal=450` is 45.0 %). An unknown key is a hard
-failure — a typo in an expectation that silently passes is worse than no
-test.
+- **A false claim in a comment.** `types.h` asserted that mixing `mv_t` and
+  `dv_t` was a compile error. It was not: a C `typedef` is an alias, so both
+  are `uint16_t` and the compiler is perfectly happy. `-Wconversion` had
+  caught the original *overflow*, never the unit confusion. The claim is gone
+  and the caveat is written down instead.
 
-**Keep every scenario you ever write.** The corpus is worth more than the
-code: it is what lets you change the torque map on a Friday and know you did
-not break the shutdown path.
+---
 
-The suite is currently seven files and 80 checks:
+## Rules
 
-```
-01_normal_startup      LV -> precharge -> RTD -> drive, the happy path
-02_apps_disagreement   FSAE T.4, and the most important test here
-03_brake_plausibility  FSAE EV.4 (BPPC)
-04_precharge_faults    open resistor, and the timeout
-05_bms_dropout         a CAN partner goes silent mid-drive
-06_thermal_derate      motor overtemp fades torque rather than cutting it
-07_cell_sag            low cell voltage does the same, on the way down
-```
+Governing rulebook: **Formula Bharat 2027 v1.2**, in `docs/rules/`. It is an
+adaptation of FS-Rules 2026 v1.1 and the numbering matches. Rule numbers
+appear in comments wherever they drive a decision; `docs/START-HERE.md` has
+the table of the ones worth knowing up front.
+
+Note that the numbering changed from older rulebooks — what used to be `T.4`
+is now `T11.8`, and `EV.4` no longer exists.
 
 ---
 
 ## Porting to the S32K344
 
-Write `port/s32k3/main.c`. It is the only new file:
-
-```c
-for (;;) {
-    vcu_in_t in = {0};
-    in.now_ms   = OsIf_GetCounter(...);
-    in.apps1_mv = adc_read_mv(APPS1_CH);      /* Adc_Sar_Ip_*  */
-    in.apps2_mv = adc_read_mv(APPS2_CH);
-    sig_decode(&in);                           /* Flexcan_Ip_*  */
-
-    vcu_out_t out;
-    vcu_step(&vcu, &in, &out);
-
-    gpio_write(AIR_POS, out.air_pos);          /* Siul2_Dio_Ip_* */
-    can_send_torque(out.torque_cmd, out.inverter_enable);
-    vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
-}
-```
-
-Build `src/` and `include/` unchanged with `arm-none-eabi-gcc`. No `#ifdef`
-in the VCU.
-
-Task rates on target: **1 kHz** safety (ADC + plausibility + watchdog),
-**100 Hz** control (torque + inverter TX), 50 Hz state machine, 10 Hz
-housekeeping. The safety task owns the shutdown GPIO directly so it can open
-the contactors even if everything else deadlocks.
-
----
-
-## Four things the compiler and the tests already caught
-
-Left here because they are the point:
-
-- **`-Wconversion` caught a unit bug.** A 400 V pack does not fit in a
-  `uint16_t` of millivolts. That is why HV has its own type (`dv_t`,
-  decivolts) — mixing the two is now a compile error. Warnings are errors in
-  this project from day one; it is cheap now and expensive at 4,000 lines.
-
-- **A scenario test caught double-latching.** `APPS_IMPLAUSIBLE` was latched
-  both in `apps.c` (per the rule) and again in the fault table, so the
-  driver could never recover by releasing the pedal — which is exactly what
-  FSAE T.4 says should happen. One latch, one owner. See the comment in
-  `src/app/fault.c`.
-
-- **`-Wconversion` again, and this time it stopped the build.** `return
-  -max_mag` in `torque.c` promotes to `int` and narrows back to `int16_t`,
-  which a newer clang rejects outright. Worth knowing that the warning set
-  in this repo is strict enough that a compiler upgrade can fail it — that
-  is the deal, and it is still the right deal.
-
-- **A dead code path nobody noticed.** The plant integrated temperature with
-  integer division at a 1 ms tick, so every increment truncated to zero and
-  both temperatures sat at exactly 25 °C for the life of the project. The
-  entire thermal derate in `torque.c` had therefore never executed once.
-  `plant.h` already carried a comment warning about this exact trap for
-  `rpm` — the same bug, twelve lines apart, caught once. Fixed with a
-  micro-degree accumulator; `06_thermal_derate.scn` now covers the path.
-
----
-
-## Not implemented yet
-
-- **The BMS current limit stage of the torque pipeline.** The slot is left
-  in the pipeline in `src/app/torque.c`, between the map and the thermal
-  derate, with a comment saying so. It needs a motor torque constant to get
-  from amps to newton-metres, and inventing that number would give you a
-  calibration you cannot check against anything.
-- `sig/` — CAN encode/decode. Generate it from a DBC with `cantools`; do not
-  hand-write bit packing.
-- Datalogging. Not optional in practice — you cannot debug a moving vehicle
-  without it.
-- NVM for calibration.
-- Drive modes beyond a linear torque map.
-
-## Deliberately not implemented
-
-**The BSPD is not here and must not be.** Per FSAE rules it is an analogue
-hardware circuit that opens the shutdown circuit on simultaneous hard
-braking and high HV power, latching for at least one second. Implementing it
-in the MCU does not satisfy the rule and does not make the car safe.
+Write `board/s32k3/main.c`. It is the only new file, and
+`board/s32k3/README.md` has the sketch, the task rates, and the list of
+things that will bite you. Build `core/` unchanged with `arm-none-eabi-gcc`.
+No `#ifdef` in the controller.

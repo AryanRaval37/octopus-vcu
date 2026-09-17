@@ -1,0 +1,42 @@
+# Accelerator and brake at the same time: torque off until the accelerator
+# comes back under the reset threshold. Lifting off the brake is not enough
+# -- if it were, a jammed throttle would be cleared by the one action a
+# startled driver is least likely to take.
+#
+# A6.4.4 requires a working "APPS/brake pedal plausibility check" to operate
+# the car, but FB2027 no longer specifies its numbers anywhere. The 25 % and
+# 5 % here are carried over from older FSAE/FSG rulebooks, which is what
+# scrutineers will recognise. They are ours to justify.
+#
+# This is NOT the BSPD. That is a standalone non-programmable circuit on the
+# shutdown loop (T11.6) with its threshold set by a varistor -- see the note
+# at the bottom of core/config.h about keeping the two consistent.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+t=3400   pedal=600
+t=3500   expect_torque_min=1
+
+# Driver brakes hard while still on the throttle.
+t=3600   brake=500
+t=3700   expect_fault=BPPC expect_torque_max=0
+
+# Releasing the brake alone must NOT restore torque.
+t=4000   brake=0
+t=4200   expect_fault=BPPC expect_torque_max=0
+
+# Lifting to 10 % is still not enough -- the threshold is 5 %.
+t=4500   pedal=100
+t=4700   expect_fault=BPPC expect_torque_max=0
+
+# Below 5 %: cleared.
+t=5000   pedal=0
+t=5200   expect_no_fault=BPPC
+
+# And torque is available again.
+t=5400   pedal=600
+t=5800   expect_torque_min=1

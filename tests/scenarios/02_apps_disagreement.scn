@@ -1,8 +1,16 @@
-# FSAE T.4: if the two APPS channels disagree by more than 10 % of pedal
-# travel for more than 100 ms, power to the motor must be shut off.
+# T11.8.9 defines implausibility as "a deviation of more than ten percentage
+# points pedal travel between any of the used APPSs", and T11.8.8 says that
+# once it persists past 100 ms the power to the motors must be shut down.
 #
-# This is the single most important test in the repo. It is also the one you
-# can never safely run in a car, which is exactly why it lives here.
+# Note what T11.8.8 goes on to say: "It is not necessary to completely
+# deactivate the tractive system." So this is a LIMP fault -- torque goes to
+# zero, the AIRs stay closed, and the driver recovers by releasing the pedal.
+# A channel going open or short is a different matter entirely; that is a
+# System Critical Signal failure and T11.9.5 wants the contactors open. See
+# 09_brake_plausibility.scn for the other half of that argument.
+#
+# This is the single most important test in the repo, and the one you can
+# never safely run in a car -- which is exactly why it lives here.
 
 t=0      expect_state=LV_READY
 t=100    ts=1
@@ -23,6 +31,10 @@ t=3550   expect_no_fault=APPS_IMPLAUSIBLE
 
 # By 100 ms after onset it must be latched and torque must be zero.
 t=3620   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0 expect_enable=0
+
+# HV stays up. This is the T11.8.8 half of the rule, and getting it wrong
+# means a pit-lane recovery becomes a full restart.
+t=3630   expect_state=DRIVE expect_air_pos=1
 
 # The latch must hold even once the sensors agree again...
 t=4000   apps2_mv=2700

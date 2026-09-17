@@ -8,7 +8,7 @@
  */
 #include "sim/scenario.h"
 #include "sim/plant.h"
-#include "vcu/vcu.h"
+#include "core/vcu.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -70,7 +70,7 @@ static void fail(scenario_result_t *res, const char *path, const event_t *e,
  * and passes forever. A test that cannot fail is worse than no test,
  * because you believe it. */
 static bool apply(const event_t *e, plant_t *p, const vcu_out_t *out,
-                  scenario_result_t *res, const char *path)
+                  const vcu_t *vcu, scenario_result_t *res, const char *path)
 {
     const char *k = e->key;
     const char *v = e->val;
@@ -81,18 +81,24 @@ static bool apply(const event_t *e, plant_t *p, const vcu_out_t *out,
     else if (!strcmp(k, "brake"))      plant_set_brake_pct(p, (int)n);
     else if (!strcmp(k, "apps1_mv"))   p->apps1_mv = (mv_t)n;
     else if (!strcmp(k, "apps2_mv"))   p->apps2_mv = (mv_t)n;
-    else if (!strcmp(k, "brake_mv"))   p->brake_mv = (mv_t)n;
+    else if (!strcmp(k, "brake1_mv"))  p->brake1_mv = (mv_t)n;
+    else if (!strcmp(k, "brake2_mv"))  p->brake2_mv = (mv_t)n;
     else if (!strcmp(k, "ts"))         p->ts_request = n != 0;
     else if (!strcmp(k, "rtd"))        p->rtd_button = n != 0;
-    else if (!strcmp(k, "mode"))       p->mode = (drive_mode_t)n;
+    else if (!strcmp(k, "sdc"))        p->sdc_ok = n != 0;
     else if (!strcmp(k, "dir"))        p->dir  = (direction_t)n;
     else if (!strcmp(k, "bms_alive"))  p->bms_alive = n != 0;
     else if (!strcmp(k, "inv_alive"))  p->inv_alive = n != 0;
     else if (!strcmp(k, "bms_fault"))  p->bms_fault = n != 0;
     else if (!strcmp(k, "inv_fault"))  p->inv_fault = n != 0;
+    else if (!strcmp(k, "bms_stuck"))  p->bms_counter_stuck = n != 0;
+    else if (!strcmp(k, "inv_stuck"))  p->inv_counter_stuck = n != 0;
+    else if (!strcmp(k, "bms_crc_bad")) p->bms_crc_bad = n != 0;
+    else if (!strcmp(k, "inv_crc_bad")) p->inv_crc_bad = n != 0;
     else if (!strcmp(k, "soc"))        p->soc = (pct_x10_t)n;
     else if (!strcmp(k, "cell_mv"))    p->cell_min_mv = (mv_t)n;
-    else if (!strcmp(k, "rpm"))        p->rpm = (rpm_t)n;
+    else if (!strcmp(k, "amp_limit"))  p->discharge_limit = (amp_x10_t)n;
+    else if (!strcmp(k, "rpm"))        plant_set_rpm(p, (rpm_t)n);
     else if (!strcmp(k, "temp_motor")) plant_set_temp_motor(p, (degc_t)n);
     else if (!strcmp(k, "temp_inv"))   plant_set_temp_inv(p, (degc_t)n);
     else if (!strcmp(k, "pc_open"))    p->precharge_resistor_open = n != 0;
@@ -134,6 +140,35 @@ static bool apply(const event_t *e, plant_t *p, const vcu_out_t *out,
         res->checks++;
         if (out->inverter_enable != (n != 0))
             fail(res, path, e, "inverter_enable: want %ld, got %d", n, out->inverter_enable);
+    }
+    else if (!strcmp(k, "expect_brake_min")) {
+        res->checks++;
+        if (out->brake < (pct_x10_t)n)
+            fail(res, path, e, "brake %u < min %ld", out->brake, n);
+    }
+    else if (!strcmp(k, "expect_brake_max")) {
+        res->checks++;
+        if (out->brake > (pct_x10_t)n)
+            fail(res, path, e, "brake %u > max %ld", out->brake, n);
+    }
+    else if (!strcmp(k, "expect_air_neg")) {
+        res->checks++;
+        if (out->air_neg != (n != 0))
+            fail(res, path, e, "air_neg: want %ld, got %d", n, out->air_neg);
+    }
+    /* The log is part of the product, so it gets assertions too. A recorder
+     * that quietly stops recording is worth finding here rather than after
+     * the one run you needed it for. */
+    else if (!strcmp(k, "expect_log_min")) {
+        res->checks++;
+        if (datalog_pending(&vcu->log) < (uint16_t)n)
+            fail(res, path, e, "log has %u rows, want >= %ld",
+                 datalog_pending(&vcu->log), n);
+    }
+    else if (!strcmp(k, "expect_log_dropped")) {
+        res->checks++;
+        if (vcu->log.dropped != (uint32_t)n)
+            fail(res, path, e, "log dropped %u, want %ld", vcu->log.dropped, n);
     }
     else {
         return false;
@@ -204,7 +239,7 @@ bool scenario_run_file(const char *path, unsigned tick_ms,
 
         for (int i = first; i < nev && ev[i].t_ms <= t; i++) {
             if (strncmp(ev[i].key, "expect_", 7) == 0) continue;
-            if (!apply(&ev[i], &plant, &out, res, path)) {
+            if (!apply(&ev[i], &plant, &out, &vcu, res, path)) {
                 fprintf(stderr, "%s:%d: unknown key '%s'\n",
                         path, ev[i].line, ev[i].key);
                 res->failures++;
@@ -217,7 +252,7 @@ bool scenario_run_file(const char *path, unsigned tick_ms,
 
         while (next < nev && ev[next].t_ms <= t) {
             if (strncmp(ev[next].key, "expect_", 7) == 0) {
-                if (!apply(&ev[next], &plant, &out, res, path)) {
+                if (!apply(&ev[next], &plant, &out, &vcu, res, path)) {
                     fprintf(stderr, "%s:%d: unknown key '%s'\n",
                             path, ev[next].line, ev[next].key);
                     res->failures++;

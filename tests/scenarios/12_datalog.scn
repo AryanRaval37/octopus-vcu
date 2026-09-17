@@ -1,0 +1,30 @@
+# The log is part of the product, so it gets tested like one.
+#
+# A recorder that quietly stops recording is the worst possible failure: you
+# find out about it after the one run you needed it for. So assert that rows
+# appear, and that nothing is being dropped at the depth we chose.
+
+t=0      expect_state=LV_READY
+
+# Even standing still, the heartbeat is writing rows (10 Hz).
+t=900    expect_log_min=8
+
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+t=3400   pedal=500
+
+# ~3.5 s of heartbeat plus the state transitions along the way.
+t=3600   expect_log_min=35
+
+# A fault is recorded on the tick it happens, not at the next heartbeat --
+# that is the whole point, and it is the row you will actually want.
+t=4000   apps2_mv=2000
+t=4150   expect_fault=APPS_IMPLAUSIBLE
+t=4160   expect_log_min=40
+
+# 256 rows deep at 10 Hz is 25 s of history. Nothing should have been lost
+# in a scenario this short; if this ever fails, either the heartbeat got
+# faster or something is writing a row every tick.
+t=4200   expect_log_dropped=0

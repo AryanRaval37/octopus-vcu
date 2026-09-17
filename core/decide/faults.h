@@ -1,4 +1,4 @@
-/* fault.h — one table, one policy.
+/* faults.h — one table, one policy.
  *
  * The rule that keeps this from rotting: modules REPORT, they do not
  * DECIDE. Call fault_report(f, id, present) every tick and the fault
@@ -11,7 +11,7 @@
 #ifndef VCU_FAULT_H
 #define VCU_FAULT_H
 
-#include "vcu/types.h"
+#include "core/types.h"
 
 typedef struct {
     fault_id_t  id;

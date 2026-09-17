@@ -1,0 +1,41 @@
+# EV2.2.1 caps tractive-system power at 80 kW and EV2.2.2 caps current at
+# 500 A. Nothing downstream enforces either for you.
+#
+# This is also where the BMS discharge limit finally lands, and going
+# through power is what makes that possible at all. Amps become newton-metres
+# only if you know the motor's torque constant, which is not in this repo --
+# but amps times pack volts are watts, and watts divided by rpm are
+# newton-metres. No datasheet required.
+#
+#   T_x10 = P * 600 / (rpm * 2*pi) = P * 95.493 / rpm
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+t=3300   brake=0
+
+# Flat out at low speed: power is no constraint down here, so the torque map
+# wins and we get the full 200.0 Nm.
+t=3400   pedal=1000 rpm=500
+t=3500   expect_torque_min=1950 expect_torque_max=2000
+
+# Same pedal at 4000 rpm. 80 kW / 4000 rpm works out at 190.9 Nm, so the
+# power ceiling now bites before the torque map does.
+t=4000   rpm=4000
+t=4100   expect_torque_max=1950 expect_torque_min=1850
+
+# And at 5000 rpm, 152.7 Nm.
+t=4500   rpm=5000
+t=4600   expect_torque_max=1570 expect_torque_min=1470
+
+# --- now let the BMS be the one saying no ---------------------------------
+# Drop the pack's discharge limit to 50.0 A. At 400 V that is 20 kW, which
+# at 4000 rpm is 47.7 Nm -- far below both the torque map and the rule.
+# Lowest ceiling wins.
+t=5000   rpm=4000 amp_limit=500
+t=5150   expect_torque_max=520 expect_torque_min=430
+
+# Give the pack its capability back and the torque returns.
+t=6000   amp_limit=2000
+t=6200   expect_torque_min=1800

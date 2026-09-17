@@ -1,17 +1,17 @@
 /* state.h — the vehicle state machine, and the precharge sequencer.
  *
- * Precharge lives in here rather than in a module of its own because it is
- * a state, not a service. Every way out of it is a state transition, and
+ * Precharge lives in here rather than in a module of its own because it is a
+ * state, not a service. Every way out of it is a state transition, and
  * splitting it off would leave two pieces of code that have to agree about
  * one timer. They would stop agreeing.
  */
 #ifndef VCU_STATE_H
 #define VCU_STATE_H
 
-#include "vcu/apps.h"
-#include "vcu/config.h"
-#include "vcu/fault.h"
-#include "vcu/types.h"
+#include "core/config.h"
+#include "core/decide/faults.h"
+#include "core/sense/pedals.h"
+#include "core/types.h"
 
 typedef struct {
     vcu_state_t state;
@@ -28,8 +28,12 @@ typedef struct {
 
 void state_init(state_mgr_t *s);
 
+// bms_ok / inv_ok come from core/sense/signals.h — "may I steer a car by
+// what this device last said?". Passed in rather than read from `in`,
+// because deciding that is sense's job and this file is decide.
 void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
-                const apps_t *apps, fault_mgr_t *faults, uint16_t dt_ms);
+                const pedals_t *pedals, fault_mgr_t *faults,
+                bool bms_ok, bool inv_ok, uint16_t dt_ms);
 
 // Contactors and buzzer fall out of the state plus a timer, so derive them
 // instead of storing them. One less thing that can disagree with itself.

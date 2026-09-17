@@ -1,0 +1,38 @@
+# The brake has two sensors too, and T11.9.1 makes both of them System
+# Critical Signals -- T6.1.13 lets the first 90 % of brake travel command
+# regen, and anything that influences wheel torque is an SCS.
+#
+# So the brake pair gets the same treatment as the accelerator: range check
+# each channel, compare the two, and decide which one to believe.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+
+# Both channels agree at 40 %, so the arbitrated brake reads 40 %.
+t=3250   expect_brake_min=395 expect_brake_max=405
+
+# Now channel 2 sags while channel 1 still says 40 %. Unlike the
+# accelerator, the brake believes the HIGHER channel: a disagreeing brake
+# sensor should make the car more cautious, not less.
+t=3300   brake2_mv=1000
+t=3350   expect_brake_min=395
+
+# Held past the 250 ms window, that is an implausibility. Severity is LIMP,
+# so torque goes away but the tractive system stays up -- a disagreeing
+# brake sensor is not a reason to drop HV.
+t=3600   expect_fault=BRAKE_IMPLAUSIBLE
+t=3650   expect_torque_max=0 expect_state=DRIVE expect_air_pos=1
+
+# Agreement alone does not clear it; the pedal has to come back up.
+t=4000   brake=400
+t=4200   expect_fault=BRAKE_IMPLAUSIBLE
+t=4500   brake=0
+t=4700   expect_no_fault=BRAKE_IMPLAUSIBLE
+
+# A channel out of its legal window is a different animal: that is a signal
+# failure, and T11.9.5 says the safe state is opened SDC and opened AIRs.
+t=5000   brake1_mv=100
+t=5100   expect_fault=BRAKE_RANGE
+t=5200   expect_state=FAULT expect_air_pos=0
