@@ -1,0 +1,70 @@
+# Ways into R2D that shouldn't work, and the one that should.
+#
+# EV4.11.7: the transition may only happen while the brakes are on, together
+# with a dedicated action. EV4.11.6: R2D is the moment the motors respond to
+# the APPS. So the brake, the button press and live motors all happen on
+# the same tick, and that tick also needs the throttle at rest and nothing
+# holding torque off.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   expect_state=RTD_WAIT
+
+# Button already held, then the brake. The press itself has to happen while
+# braking, otherwise a stuck button plus a foot on the brake would do it.
+t=1500   rtd=1
+t=1600   brake=400
+t=2000   expect_state=RTD_WAIT expect_buzzer=0
+
+# Button without the brake.
+t=2100   rtd=0 brake=0
+t=2200   rtd=1
+t=2300   expect_state=RTD_WAIT expect_buzzer=0
+t=2400   rtd=0
+
+# Only one brake channel says the brake is on (channel 2 at ~62 %, channel
+# 1 at 0 %). With the higher channel winning this would count as braking,
+# so R2D checks both.
+t=2500   brake2_mv=3000
+t=2600   rtd=1
+t=2650   expect_state=RTD_WAIT expect_buzzer=0
+t=2700   rtd=0 brake=0
+
+# Brake and button, but also 10 % throttle. Going live now would mean the
+# car pulls the instant it enters R2D.
+t=2800   brake=400 pedal=100
+t=2900   rtd=1
+t=2950   expect_state=RTD_WAIT expect_torque_max=0
+t=3000   rtd=0 pedal=0
+
+# APPS2 has drifted (~25 % vs 0 %), so APPS_IMPLAUSIBLE is latched. The
+# pedal reads 0, but a LIMP fault is holding torque off, and when it
+# cleared later that would be when R2D really started, brake or not.
+t=3100   apps2_duty=700
+t=3300   expect_fault=APPS_IMPLAUSIBLE
+t=3350   rtd=1
+t=3400   expect_state=RTD_WAIT
+t=3450   rtd=0 pedal=0
+t=3500   expect_no_fault=APPS_IMPLAUSIBLE
+
+# Properly this time. R2D on the press, sound for 1.5 s. Letting go of the
+# brake during the sound doesn't matter (we're already in R2D) and torque
+# follows the pedal.
+t=3600   rtd=1
+t=3601   expect_state=DRIVE expect_enable=1 expect_buzzer=1
+t=3700   rtd=0 brake=0
+t=3800   pedal=300
+t=4000   expect_state=DRIVE expect_buzzer=1 expect_torque_min=1
+t=5100   expect_buzzer=0
+t=5200   pedal=0
+
+# TS off during the sound: SHUTDOWN, and the sound stops with it.
+t=5500   ts=0
+t=5600   expect_state=SHUTDOWN
+t=6100   ts=1
+t=7500   expect_state=RTD_WAIT
+t=7600   brake=400
+t=7700   rtd=1
+t=7800   expect_state=DRIVE expect_buzzer=1
+t=8000   ts=0
+t=8001   expect_state=SHUTDOWN expect_buzzer=0 expect_air_pos=0

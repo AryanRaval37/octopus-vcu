@@ -1,11 +1,6 @@
-# T11.9.2.d requires a digitally transmitted signal to survive three
-# separate failures: data corruption (checked by a checksum), and loss and
-# delay of messages (checked by timeouts).
-#
-# Only one of the three is the obvious one. A device going quiet is easy to
-# spot. A device that keeps cheerfully re-sending one frozen frame is not --
-# the bus load looks perfect, every message passes its checksum, and the
-# pack voltage you are steering by is four seconds old.
+# T11.9.2.d: digitally transmitted signals have to survive data corruption
+# (checksum) and loss and delay of messages (timeouts). Losing a device
+# entirely is 05. This one is the two sneakier cases.
 
 t=0      expect_state=LV_READY
 t=100    ts=1
@@ -15,38 +10,32 @@ t=3300   brake=0
 t=3400   pedal=500
 t=3600   expect_torque_min=1
 
-# --- failure 2 of 3: the counter stops advancing -------------------------
-# Frames keep arriving and keep passing their checksum. Nothing a plain
-# timeout would ever notice.
+# The inverter keeps sending, checksums fine, but the rolling counter stops
+# moving: same frame over and over. A timeout never sees this.
 t=4000   inv_stuck=1
 t=4100   expect_no_fault=INVERTER_TIMEOUT
 t=4200   expect_no_fault=INVERTER_STALE
 
-# 300 ms of a frozen counter is enough.
-t=4350   expect_fault=INVERTER_STALE
+# 300 ms of a frozen counter.
+t=4350   expect_fault=INVERTER_STALE expect_no_fault=INVERTER_TIMEOUT
 t=4400   expect_state=FAULT expect_torque_max=0 expect_air_pos=0
 
-# Recover: counter moves again, fault heals after 1 s, driver re-arms.
+# Counter moves again, fault heals after 1 s, driver re-arms.
 t=5000   inv_stuck=0
 t=6100   expect_no_fault=INVERTER_STALE
 t=6300   ts=0
 t=6500   expect_state=LV_READY
 
-# --- failure 3 of 3: corrupt frames --------------------------------------
-# A bad checksum is only a warning on its own, because noise happens. But a
-# corrupt frame does not refresh the message age, so sustained corruption
-# becomes a timeout by itself -- which is the point. No separate threshold
-# to tune, and the log still says which it was.
+# BMS frames start failing their checksum. CORRUPT on its own is a warning
+# (one bad frame on a noisy bus shouldn't stop the car), but bad frames
+# don't count as heard-from, so after the timeout it's a BMS_TIMEOUT too.
 t=6600   ts=1
 t=7000   bms_crc_bad=1
 t=7050   expect_fault=BMS_CORRUPT
-
-# 200 ms of nothing believable and the BMS has effectively gone silent.
 t=7250   expect_fault=BMS_TIMEOUT
 t=7300   expect_state=FAULT
 
-# 1 s heal, like the other bus faults -- long enough that a bus flapping in
-# and out does not fill the log with a fault that keeps un-happening.
+# 1 s heal on CORRUPT, from the first good frame at t=8000.
 t=8000   bms_crc_bad=0
 t=8500   expect_fault=BMS_CORRUPT
 t=9100   expect_no_fault=BMS_CORRUPT

@@ -1,27 +1,31 @@
-/* state.c — what the car is doing, and what it will let you do next.
- *
- * The states are the car's life story and they mostly run one way:
- *
- *   INIT -> LV_READY -> PRECHARGE -> TS_ACTIVE -> RTD_WAIT -> DRIVE
- *
- * with a trapdoor to FAULT underneath all of them. Two are worth slowing
- * down for. PRECHARGE, because getting it wrong welds a contactor shut.
- * RTD_WAIT, because that is the gate between "the car is on" and "the car
- * can move", and an electric car is quiet enough that the gate has to
- * include making a noise.
- *
- * Next: core/decide/torque.c.
- */
+// state.c - vehicle state machine.
+//
+//   INIT -> LV_READY -> PRECHARGE -> TS_ACTIVE -> RTD_WAIT -> DRIVE
+//
+// Any CRITICAL fault sends us to FAULT from wherever we are. Getting out of
+// FAULT needs the fault gone *and* the driver to let go of the TS request,
+// so the car never comes back up on its own (EV4.11.4).
+
 #include "core/decide/state.h"
 
-static const char *NAMES[VCU_STATE_COUNT] = {
-    "INIT", "LV_READY", "PRECHARGE", "TS_ACTIVE", "RTD_WAIT",
-    "DRIVE", "FAULT", "SHUTDOWN"
+// Time with everything open after a normal shutdown before we'll accept a
+// new TS request. Lets the relays drop out and the discharge circuit start.
+#define SHUTDOWN_HOLD_MS 500u
+
+static const char *const NAMES[VCU_STATE_COUNT] = {
+    [VCU_INIT]      = "INIT",
+    [VCU_LV_READY]  = "LV_READY",
+    [VCU_PRECHARGE] = "PRECHARGE",
+    [VCU_TS_ACTIVE] = "TS_ACTIVE",
+    [VCU_RTD_WAIT]  = "RTD_WAIT",
+    [VCU_DRIVE]     = "DRIVE",
+    [VCU_FAULT]     = "FAULT",
+    [VCU_SHUTDOWN]  = "SHUTDOWN",
 };
 
 const char *vcu_state_name(vcu_state_t s)
 {
-    return (s < VCU_STATE_COUNT) ? NAMES[s] : "?";
+    return (s < VCU_STATE_COUNT && NAMES[s]) ? NAMES[s] : "?";
 }
 
 void state_init(state_mgr_t *s)
@@ -42,9 +46,8 @@ static void go(state_mgr_t *s, vcu_state_t next)
     s->in_state_ms = 0;
 }
 
-// How full the DC link is, as a percentage of the pack. The pack_dv guard is
-// there because a dead BMS reports zero volts, and dividing by that ends the
-// tick rather abruptly.
+// DC link as a percentage of pack voltage. Needs both devices trusted, and
+// the pack_dv floor is so a BMS reporting 0 V doesn't divide by zero.
 static pct_x10_t dc_link_pct(const vcu_in_t *in, bool bms_ok, bool inv_ok)
 {
     if (!inv_ok || !bms_ok || in->bms.pack_dv < 100) return 0;
@@ -59,15 +62,14 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
     s->entered = false;
     s->in_state_ms += dt_ms;
 
-    /* The trapdoor, checked before any per-state logic. A critical fault
-     * means FAULT from wherever you happen to be standing.
-     *
-     * Writing it once here instead of as a branch inside all eight states is
-     * the difference between a state machine you can hold in your head and
-     * one you can only grep. Note that an open shutdown circuit reaches this
-     * through the fault table rather than as a special case — EV4.11.8 wants
-     * R2D left immediately, and the fastest way to be sure of that is to
-     * give it no separate path to get wrong. */
+    // Edge, not level, so a button that's held (or stuck) from earlier
+    // can't count as the driver's "dedicated additional action".
+    const bool rtd_pressed = in->rtd_button && !s->prev_rtd_button;
+    s->prev_rtd_button = in->rtd_button;
+
+    // One check here instead of one in every state. An open SDC comes in
+    // through the fault table as well (FAULT_SDC_OPEN), which is how
+    // EV4.11.8 gets handled.
     if (fault_worst(faults) == FAULT_SEV_CRITICAL &&
         s->state != VCU_FAULT && s->state != VCU_SHUTDOWN) {
         go(s, VCU_FAULT);
@@ -77,8 +79,7 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
     switch (s->state) {
 
     case VCU_INIT:
-        // Self-tests would go here. Both CAN partners have to be alive
-        // before we are willing to discuss closing a contactor.
+        // Don't go anywhere until both CAN partners have been heard from.
         if (bms_ok && inv_ok) go(s, VCU_LV_READY);
         break;
 
@@ -88,19 +89,15 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
         break;
 
     case VCU_PRECHARGE: {
-        /* You cannot just close a contactor onto 400 V. The inverter's
-         * DC-link capacitors look like a dead short and the contactor welds
-         * itself shut. So AIR- closes, a relay feeds the link through a
-         * resistor, and we sit here watching the voltage climb until it
-         * reaches the 95 % that EV5.7.1 requires. */
+        // AIR- and the precharge relay are closed, the DC link charges
+        // through the resistor, and AIR+ waits for 95 % (EV5.7.1).
         if (entering) {
             s->pc_start_dv     = inv_ok ? in->inv.dc_link_dv : 0;
             s->pc_rise_checked = false;
         }
 
-        // The failure this catches is an open precharge resistor. The link
-        // voltage simply never moves. Without the check you sit here for the
-        // full five seconds and the timeout tells you nothing about why.
+        // An open precharge resistor means the link never moves. Checking
+        // early gives a useful fault instead of a generic timeout 5 s later.
         if (!s->pc_rise_checked && s->in_state_ms >= cfg->precharge_min_rise_ms) {
             s->pc_rise_checked = true;
             const dv_t now = inv_ok ? in->inv.dc_link_dv : 0;
@@ -108,42 +105,36 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
                 fault_report(faults, FAULT_PRECHARGE_NO_RISE, true, dt_ms);
         }
 
-        if (dc_link_pct(in, bms_ok, inv_ok) >= cfg->precharge_target_pct) {
+        if (dc_link_pct(in, bms_ok, inv_ok) >= cfg->precharge_target_pct)
             go(s, VCU_TS_ACTIVE);
-        } else if (s->in_state_ms >= cfg->precharge_timeout_ms) {
+        else if (s->in_state_ms >= cfg->precharge_timeout_ms)
             fault_report(faults, FAULT_PRECHARGE_TIMEOUT, true, dt_ms);
-        }
 
         if (!in->ts_request) go(s, VCU_LV_READY);
         break;
     }
 
     case VCU_TS_ACTIVE:
-        // A single tick of "HV is up". It exists so the log shows the moment
-        // the AIRs closed, separately from waiting on the driver.
-        if (!in->ts_request) go(s, VCU_SHUTDOWN);
-        else                 go(s, VCU_RTD_WAIT);
+        // Only lasts a tick. It's here so the log has a clean "AIRs closed"
+        // row separate from waiting on the driver.
+        go(s, in->ts_request ? VCU_RTD_WAIT : VCU_SHUTDOWN);
         break;
 
     case VCU_RTD_WAIT:
         if (!in->ts_request) { go(s, VCU_SHUTDOWN); break; }
 
-        /* EV4.11.7: the move into R2D must happen "during the actuation of
-         * the mechanical brakes and a simultaneous dedicated additional
-         * action" — brake held, button pressed. EV4.12.1 then wants a sound
-         * for at least 1 s and at most 3 s.
-         *
-         * Both conditions are re-checked every tick, so letting go of the
-         * brake mid-buzz restarts the timer. It reads like box-ticking and
-         * it isn't: the car is silent, and a silent car that can lurch
-         * without warning in a pit lane full of people is the thing this
-         * prevents. */
-        if (pedals->brake_applied && in->rtd_button) {
-            s->buzzer_ms += dt_ms;
-            if (s->buzzer_ms >= cfg->rtd_buzzer_ms) { s->buzzer_ms = 0; go(s, VCU_DRIVE); }
-        } else {
-            s->buzzer_ms = 0;
-        }
+        // EV4.11.7: the transition may only happen while the brakes are on,
+        // together with a dedicated action (the button press). EV4.11.6
+        // says R2D starts the moment the motors respond to the APPS, and in
+        // DRIVE they respond straight away, so everything has to be true on
+        // this one tick. The throttle has to be at rest as well, so the car
+        // can't jump the instant it goes live, and nothing may be holding
+        // torque off (a latched LIMP fault clearing later would otherwise be
+        // the moment R2D really starts, brake or no brake).
+        if (rtd_pressed && pedals->brake_confirmed &&
+            pedals->apps.value < cfg->apps_reset_below &&
+            fault_worst(faults) < FAULT_SEV_LIMP)
+            go(s, VCU_DRIVE);
         break;
 
     case VCU_DRIVE:
@@ -151,16 +142,14 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
         break;
 
     case VCU_FAULT:
-        // Two conditions to leave, and both matter. Nothing critical still
-        // active, and the driver has let go of the TS request.
-        // fault_acknowledge() refuses to clear a fault whose cause is still
-        // there, so this cannot be button-mashed into submission.
+        // fault_acknowledge() won't clear a latched fault whose cause is
+        // still there, so holding/toggling TS can't force a way out.
         if (fault_worst(faults) < FAULT_SEV_CRITICAL && !in->ts_request)
             go(s, VCU_LV_READY);
         break;
 
     case VCU_SHUTDOWN:
-        if (s->in_state_ms > 500) go(s, VCU_LV_READY);
+        if (s->in_state_ms >= SHUTDOWN_HOLD_MS) go(s, VCU_LV_READY);
         break;
 
     default:
@@ -169,13 +158,12 @@ void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
     }
 }
 
-void state_outputs(const state_mgr_t *s, vcu_out_t *out)
+void state_outputs(const state_mgr_t *s, const vcu_cfg_t *cfg, vcu_out_t *out)
 {
     out->state = s->state;
 
-    // AIR+ closes only after precharge is done. Closing it early is the
-    // welded-contactor, dead-resistor failure the whole sequence exists to
-    // avoid, so the ordering lives here in one switch and nowhere else.
+    // The only place relay states are decided. AIR+ never closes before
+    // precharge has finished.
     switch (s->state) {
     case VCU_PRECHARGE:
         out->air_neg = true;  out->air_pos = false; out->precharge_relay = true;  break;
@@ -187,7 +175,9 @@ void state_outputs(const state_mgr_t *s, vcu_out_t *out)
         out->air_neg = false; out->air_pos = false; out->precharge_relay = false; break;
     }
 
-    out->rtd_buzzer      = (s->state == VCU_RTD_WAIT) && (s->buzzer_ms > 0);
-    out->shutdown_assert = (s->state == VCU_FAULT);
-    out->inverter_enable = (s->state == VCU_DRIVE);
+    // EV4.12.1: 1-3 s of sound while entering R2D, so it plays over the
+    // first rtd_buzzer_ms of DRIVE. If we leave DRIVE early (SDC opened, TS
+    // off) it stops with it, which is fine: the car isn't in R2D any more.
+    out->rtd_buzzer      = s->state == VCU_DRIVE && s->in_state_ms < cfg->rtd_buzzer_ms;
+    out->inverter_enable = s->state == VCU_DRIVE;
 }

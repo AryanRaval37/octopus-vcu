@@ -1,0 +1,43 @@
+# APPS wiring faults (T11.9.2), as opposed to the two channels simply
+# disagreeing (that's 02).
+
+t=0      expect_state=LV_READY
+
+# APPS2 is PWM. If the line stops toggling the board reports 0 % (stuck
+# low) or 100 % (stuck high), and both are outside the valid window.
+t=100    apps2_duty=0
+t=130    expect_fault=APPS_RANGE expect_state=FAULT expect_sdc_assert=1
+t=200    apps2_duty=1000
+t=250    expect_fault=APPS_RANGE
+
+# Fixed. APPS_RANGE heals, the VCU lets go of the SDC, SDC_OPEN heals
+# behind it, and we're back in LV_READY.
+t=300    pedal=0
+t=1500   expect_state=LV_READY expect_no_fault=APPS_RANGE expect_sdc_assert=0
+
+t=1600   ts=1
+t=3100   brake=400 rtd=1
+t=4700   expect_state=DRIVE
+t=4700   brake=0 rtd=0
+t=4800   pedal=450
+t=5000   expect_torque_min=1
+
+# A 5 ms spike out of range on APPS1. Nothing should latch: it's shorter
+# than both the APPS_RANGE debounce and the T11.8.8 100 ms window.
+t=5100   apps1_mv=100
+t=5105   pedal=450
+t=5300   expect_state=DRIVE expect_no_fault=APPS_IMPLAUSIBLE expect_no_fault=APPS_RANGE
+t=5300   expect_torque_min=1
+
+# APPS1 shorted to the 5 V rail, briefly. It reads 100 % and APPS2 still
+# says 45 %, so taking the lower channel would carry on at 45 %. With one
+# channel known to be broken the pedal reads zero instead, so torque starts
+# coming off now rather than 20 ms later when APPS_RANGE sets.
+t=5350   apps1_mv=4900
+t=5360   expect_torque_max=600
+t=5362   pedal=450
+
+# APPS1 actually goes open. The pedal reads zero straight away and 20 ms
+# later APPS_RANGE opens the AIRs (T11.9.5).
+t=5500   apps1_mv=0
+t=5525   expect_fault=APPS_RANGE expect_state=FAULT expect_torque_max=0 expect_air_pos=0

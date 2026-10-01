@@ -1,10 +1,10 @@
-// run_scenarios -- point it at .scn files, it tells you which ones broke.
+// run_scenarios - runs .scn files and reports which ones failed.
 //
 //   ./run_scenarios tests/scenarios/*.scn
 //   ./run_scenarios -v tests/scenarios/02_apps_disagreement.scn
 //
-// The -v flag prints a state trace every 100 ms, which is the fastest way
-// to find out why a scenario you just wrote does not do what you expected.
+// -v prints the state every 100 ms, which is usually the quickest way to
+// see why a new scenario isn't doing what you expected.
 
 #include "sim/scenario.h"
 

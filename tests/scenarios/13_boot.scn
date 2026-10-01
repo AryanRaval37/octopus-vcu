@@ -1,0 +1,18 @@
+# Power-on with the BMS still booting.
+#
+# On the real car the VCU will be up long before the BMS sends its first
+# frame. That is not a timeout, it is a device that hasn't started talking
+# yet, and it shouldn't drop us into FAULT and pull the shutdown line on
+# every power-up.
+
+t=0      bms_alive=0
+t=0      expect_state=INIT expect_no_fault=BMS_TIMEOUT
+t=500    expect_state=INIT expect_no_fault=BMS_TIMEOUT
+
+# First BMS frame arrives, both partners are now heard from.
+t=800    bms_alive=1
+t=850    expect_state=LV_READY expect_no_fault=BMS_TIMEOUT
+
+# Once it has been seen, losing it is a normal timeout again.
+t=2000   bms_alive=0
+t=2350   expect_fault=BMS_TIMEOUT expect_state=FAULT

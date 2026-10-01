@@ -1,0 +1,35 @@
+# Regen when off the pedal, and the brake light.
+#
+# T6.3.1: the brake light is on if and only if the hydraulic brakes are on
+# or the electric (regen) brake is. So it has to follow regen too, not just
+# the pedal.
+
+t=0      expect_state=LV_READY
+t=100    ts=1
+t=1500   rtd=1 brake=400
+t=3200   expect_state=DRIVE
+
+# Hydraulic brake.
+t=3250   expect_brake_light=1
+t=3300   brake=0
+t=3350   expect_brake_light=0
+
+t=3400   pedal=800
+t=4000   expect_torque_min=1 expect_brake_light=0
+
+# Lift at 2000 rpm: full 40.0 Nm of regen, light on.
+t=4500   pedal=0 rpm=2000
+t=4600   expect_torque_max=-390 expect_brake_light=1
+
+# The pack will only take 5.0 A. At 400 V that's 2 kW, about 9.6 Nm at
+# 2000 rpm, so that's all the regen we get.
+t=4700   charge_limit=50 rpm=2000
+t=4800   expect_torque_min=-100 expect_torque_max=-85
+
+# Nearly full pack: no regen at all, and no brake light.
+t=4900   charge_limit=500 soc=960
+t=5000   expect_torque_min=0 expect_torque_max=0 expect_brake_light=0
+
+# Slow: regen fades out below 500 rpm. 250 rpm is about half.
+t=5100   soc=800 rpm=250
+t=5200   expect_torque_max=-150 expect_torque_min=-230

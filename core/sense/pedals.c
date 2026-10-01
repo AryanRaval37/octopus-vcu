@@ -1,37 +1,27 @@
-/* pedals.c — the pedals, and whether to believe them.
- *
- * Smallest file here, and the one that can hurt someone. It all comes from
- * one sentence: a sensor cannot tell you it is lying. So there are two of
- * them on each pedal, and the job is not to read the pedal — it is to decide
- * whether the two stories agree well enough to act on.
- *
- * The accelerator and the brake are the same problem twice, so the
- * comparison lives in one function and each pedal supplies its own
- * thresholds and its own idea of which way to fail.
- *
- * Rules in play: T11.8 (accelerator), T11.9 (system critical signals),
- * A6.4.4 (the accelerator-and-brake check).
- *
- * Next: core/decide/faults.c.
- */
-#include "core/sense/pedals.h"
+// pedals.c - plausibility for the accelerator and brake pairs, and the
+// brake + throttle check.
+//
+// Rules: T11.8 (APPS), T11.9 (SCS failures), A6.4.4 (the BPPC has to work).
 
-// Raw millivolts -> 0..100.0 %, handling a falling sensor (hi < lo).
-// Saturates instead of wrapping: a pedal reading 103 % because of tolerance
-// is a 100 % pedal, not a fault.
-static pct_x10_t scale(mv_t raw, mv_t lo, mv_t hi)
+#include "core/sense/pedals.h"
+#include "core/util.h"
+
+// Raw reading -> 0..100.0 % travel. Works for a falling sensor (hi < lo).
+// Clamps rather than wraps, so a pedal that reads 103 % because of
+// tolerance is just 100 %. Whether the raw value is sane at all is the
+// range check's job, not this.
+static pct_x10_t scale(uint16_t raw, uint16_t lo, uint16_t hi)
 {
     int32_t num, den;
 
     if (lo <= hi) {
-        num = (int32_t)raw - (int32_t)lo;
-        den = (int32_t)hi  - (int32_t)lo;
+        num = (int32_t)raw - lo;
+        den = (int32_t)hi - lo;
     } else {
-        num = (int32_t)lo - (int32_t)raw;
-        den = (int32_t)lo - (int32_t)hi;
+        num = (int32_t)lo - raw;
+        den = (int32_t)lo - hi;
     }
-    if (den <= 0) return 0;
-    if (num <= 0) return 0;
+    if (den <= 0 || num <= 0) return 0;
     if (num >= den) return PCT_MAX;
     return (pct_x10_t)((num * PCT_MAX) / den);
 }
@@ -41,47 +31,47 @@ static pct_x10_t abs_diff(pct_x10_t a, pct_x10_t b)
     return (pct_x10_t)(a > b ? a - b : b - a);
 }
 
-/* One tick of a redundant pair.
- *
- * `fail_low` is the interesting argument. When the two channels disagree we
- * still have to hand back a number, and which one you pick says what you
- * think the dangerous direction is. For the accelerator, believe the lower
- * channel — a drifting sensor then makes the car slower than asked, never
- * faster. For the brake, believe the higher one, for exactly the same
- * reason pointed the other way. */
-static void pair_step(pair_t *p, mv_t raw1, mv_t raw2,
-                      mv_t lo1, mv_t hi1, mv_t lo2, mv_t hi2,
-                      mv_t range_min, mv_t range_max,
-                      pct_x10_t dev_max, uint16_t dev_ms,
+static bool in_window(uint16_t raw, const sensor_cal_t *c)
+{
+    return raw >= c->min && raw <= c->max;
+}
+
+// One tick of a redundant pair.
+//
+// fail_low picks which channel to believe while they disagree. For the
+// accelerator that's the lower one (the car does less than asked, never
+// more). For the brake it's the higher one.
+static void pair_step(sensor_pair_t *p, uint16_t raw1, uint16_t raw2,
+                      const sensor_cal_t *c1, const sensor_cal_t *c2,
+                      pct_x10_t dev_max, uint16_t dev_ms, pct_x10_t reset_below,
                       bool fail_low, uint16_t dt_ms)
 {
-    /* Range check first. An open or shorted wire lands outside the sensor's
-     * legal window, and T11.9.2 treats that as a different animal from "the
-     * two disagree" — different cause, different safe state, and different
-     * thing to go and fix. */
-    p->ch1_ok = (raw1 >= range_min) && (raw1 <= range_max);
-    p->ch2_ok = (raw2 >= range_min) && (raw2 <= range_max);
+    p->ch1_ok = in_window(raw1, c1);
+    p->ch2_ok = in_window(raw2, c2);
+    p->ch1 = scale(raw1, c1->lo, c1->hi);
+    p->ch2 = scale(raw2, c2->lo, c2->hi);
 
-    p->ch1 = scale(raw1, lo1, hi1);
-    p->ch2 = scale(raw2, lo2, hi2);
+    p->value = fail_low ? min_u16(p->ch1, p->ch2) : max_u16(p->ch1, p->ch2);
 
-    /* Deviation past its time limit, and power goes away. The timer is the
-     * rule, so add up real elapsed time rather than counting ticks: one
-     * noisy sample must not trip it, and a real disagreement must not get
-     * averaged away into something prettier. */
-    if (pair_range_bad(p)) {
-        p->deviation_ms = dev_ms;                 // broken wire: no grace period
-    } else if (abs_diff(p->ch1, p->ch2) > dev_max) {
-        uint32_t t = (uint32_t)p->deviation_ms + dt_ms;
-        p->deviation_ms = (t > 0xFFFFu) ? 0xFFFFu : (uint16_t)t;
-    } else {
-        p->deviation_ms = 0;
-    }
+    // T11.8.9 counts both a disagreement and a T11.9 wiring fault as an
+    // implausibility, and T11.8.8 allows 100 ms before power has to go. So
+    // both run on the same timer. (This used to jump straight to "latched"
+    // on the first out-of-range sample, so one bit of ADC noise meant no
+    // torque until the driver lifted.) A wire that is actually broken still
+    // gets caught quickly by the *_RANGE fault, which opens the AIRs.
+    const bool agree = abs_diff(p->ch1, p->ch2) <= dev_max;
+    const bool bad   = pair_range_bad(p) || !agree;
 
+    p->deviation_ms = bad ? sat_add(p->deviation_ms, dt_ms) : 0;
     if (p->deviation_ms >= dev_ms) p->implausible = true;
 
-    p->value = fail_low ? ((p->ch1 < p->ch2) ? p->ch1 : p->ch2)
-                        : ((p->ch1 > p->ch2) ? p->ch1 : p->ch2);
+    // Agreeing again isn't enough to clear it, the pedal also has to come
+    // back up. Otherwise an intermittent sensor is something you can drive
+    // through by feathering the pedal.
+    if (p->implausible && !bad && p->value < reset_below) {
+        p->implausible  = false;
+        p->deviation_ms = 0;
+    }
 }
 
 void pedals_init(pedals_t *p)
@@ -93,55 +83,35 @@ void pedals_init(pedals_t *p)
 void pedals_step(pedals_t *p, const vcu_cfg_t *cfg, const vcu_in_t *in,
                  uint16_t dt_ms)
 {
-    // Brake first, because the accelerator-and-brake check below needs it.
-    pair_step(&p->brake, in->brake1_mv, in->brake2_mv,
-              cfg->brake1_lo_mv, cfg->brake1_hi_mv,
-              cfg->brake2_lo_mv, cfg->brake2_hi_mv,
-              cfg->brake_range_min_mv, cfg->brake_range_max_mv,
-              cfg->brake_deviation_max, cfg->brake_deviation_ms,
-              false, dt_ms);                       // brake: believe the higher
+    pair_step(&p->brake, in->brake1_mv, in->brake2_mv, &cfg->brake1, &cfg->brake2,
+              cfg->brake_deviation_max, cfg->brake_deviation_ms, cfg->brake_reset_below,
+              false, dt_ms);
 
-    pair_step(&p->apps, in->apps1_mv, in->apps2_mv,
-              cfg->apps1_lo_mv, cfg->apps1_hi_mv,
-              cfg->apps2_lo_mv, cfg->apps2_hi_mv,
-              cfg->apps_range_min_mv, cfg->apps_range_max_mv,
-              cfg->apps_deviation_max, cfg->apps_deviation_ms,
-              true, dt_ms);                        // accelerator: believe the lower
+    pair_step(&p->apps, in->apps1_mv, in->apps2_duty, &cfg->apps1, &cfg->apps2,
+              cfg->apps_deviation_max, cfg->apps_deviation_ms, cfg->apps_reset_below,
+              true, dt_ms);
 
-    p->brake_applied = p->brake.value >= cfg->brake_applied_pct;
+    // With a channel electrically broken there's no telling which one is
+    // right, so the pedal reads zero until it's fixed.
+    if (pair_range_bad(&p->apps)) p->apps.value = 0;
 
-    /* Clearing an implausibility latch takes more than agreement — the
-     * driver has to physically release the pedal. Otherwise an intermittent
-     * sensor is something you can drive straight through by feathering the
-     * throttle, which is the exact thing the rule exists to stop. */
-    if (p->apps.implausible && !pair_range_bad(&p->apps) &&
-        abs_diff(p->apps.ch1, p->apps.ch2) <= cfg->apps_deviation_max &&
-        p->apps.value < cfg->apps_reset_below) {
-        p->apps.implausible  = false;
-        p->apps.deviation_ms = 0;
-    }
+    // "Applied" uses the higher channel, which is the cautious reading for
+    // the BPPC and the brake light. Entering R2D wants the opposite: both
+    // channels have to agree the brake is pressed, or a sensor stuck high
+    // would let the car go live without the driver's foot on the brake.
+    const pct_x10_t on = cfg->brake_applied_pct;
+    p->brake_applied   = p->brake.value >= on;
+    p->brake_confirmed = p->brake.ch1 >= on && p->brake.ch2 >= on
+                      && !pair_range_bad(&p->brake) && !p->brake.implausible;
 
-    if (p->brake.implausible && !pair_range_bad(&p->brake) &&
-        abs_diff(p->brake.ch1, p->brake.ch2) <= cfg->brake_deviation_max &&
-        p->brake.value < cfg->apps_reset_below) {
-        p->brake.implausible  = false;
-        p->brake.deviation_ms = 0;
-    }
-
-    /* Brakes on and a real throttle demand at the same time means something
-     * is stuck, and torque stays off until the accelerator comes back under
-     * the reset threshold. Lifting off the brake does not count — if it did,
-     * a jammed throttle cable would be cleared by the one action a startled
-     * driver is least likely to take.
-     *
-     * A6.4.4 requires this check to be working. It is NOT the BSPD, which is
-     * a separate non-programmable circuit on the shutdown loop (T11.6) —
-     * see the note in core/config.h about keeping the two thresholds
-     * consistent once that board is trimmed. */
+    // BPPC. Brakes on with more than bppc_apps_trip of throttle latches the
+    // torque off, and only lifting the throttle below bppc_apps_reset clears
+    // it. Letting go of the brake doesn't count: with a stuck throttle that's
+    // the last thing a startled driver will do.
     if (!p->bppc_latched) {
         if (p->brake_applied && p->apps.value > cfg->bppc_apps_trip)
             p->bppc_latched = true;
-    } else {
-        if (p->apps.value < cfg->bppc_apps_reset) p->bppc_latched = false;
+    } else if (p->apps.value < cfg->bppc_apps_reset) {
+        p->bppc_latched = false;
     }
 }

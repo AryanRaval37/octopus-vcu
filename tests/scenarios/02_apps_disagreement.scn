@@ -1,16 +1,13 @@
-# T11.8.9 defines implausibility as "a deviation of more than ten percentage
-# points pedal travel between any of the used APPSs", and T11.8.8 says that
-# once it persists past 100 ms the power to the motors must be shut down.
+# APPS channels disagreeing.
 #
-# Note what T11.8.8 goes on to say: "It is not necessary to completely
-# deactivate the tractive system." So this is a LIMP fault -- torque goes to
-# zero, the AIRs stay closed, and the driver recovers by releasing the pedal.
-# A channel going open or short is a different matter entirely; that is a
-# System Critical Signal failure and T11.9.5 wants the contactors open. See
-# 09_brake_plausibility.scn for the other half of that argument.
+# T11.8.9: implausibility is "a deviation of more than ten percentage points
+# pedal travel between any of the used APPSs". T11.8.8: if it lasts more
+# than 100 ms, motor power off, but "it is not necessary to completely
+# deactivate the tractive system". So torque goes to zero, the AIRs stay
+# closed, and the driver recovers by lifting off.
 #
-# This is the single most important test in the repo, and the one you can
-# never safely run in a car -- which is exactly why it lives here.
+# (A channel that's actually broken is a different fault with a different
+# response, see 16_apps_wiring.scn.)
 
 t=0      expect_state=LV_READY
 t=100    ts=1
@@ -18,28 +15,25 @@ t=1500   rtd=1 brake=400
 t=3200   expect_state=DRIVE
 t=3300   brake=0
 
-# Driving normally at 45 % pedal, both channels agreeing.
 t=3400   pedal=450
 t=3450   expect_torque_min=1 expect_no_fault=APPS_IMPLAUSIBLE
 
-# Channel 2 starts reading wrong. Pedal is 45 % (ch1), but ch2's raw value
-# now corresponds to ~62 % -> a 17 % disagreement, well over the 10 % limit.
-t=3500   apps2_mv=2000
+# APPS2 drifts: 400 is ~62 % on its scale while APPS1 still says 45 %.
+t=3500   apps2_duty=400
 
-# Must NOT have tripped yet: the rule allows up to 100 ms.
+# Still inside the 100 ms.
 t=3550   expect_no_fault=APPS_IMPLAUSIBLE
 
-# By 100 ms after onset it must be latched and torque must be zero.
+# Past it: latched, no torque, inverter disabled.
 t=3620   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0 expect_enable=0
 
-# HV stays up. This is the T11.8.8 half of the rule, and getting it wrong
-# means a pit-lane recovery becomes a full restart.
+# HV stays up (T11.8.8), so recovering doesn't need a full restart.
 t=3630   expect_state=DRIVE expect_air_pos=1
 
-# The latch must hold even once the sensors agree again...
-t=4000   apps2_mv=2700
+# Agreeing again isn't enough...
+t=4000   apps2_duty=540
 t=4200   expect_fault=APPS_IMPLAUSIBLE expect_torque_max=0
 
-# ...and only clear once the driver actually releases the pedal below 5 %.
+# ...the pedal has to come back under 5 %.
 t=5000   pedal=0
 t=5200   expect_no_fault=APPS_IMPLAUSIBLE

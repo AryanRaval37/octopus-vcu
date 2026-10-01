@@ -1,64 +1,75 @@
-# board/s32k3 — the real one, when the hardware arrives
+# board/s32k3
 
-Empty on purpose. This directory is the whole cost of moving to the target:
-one `main.c` and a handful of driver shims. Nothing in `core/` changes.
+Empty until the hardware exists. Moving to the target should mean writing a
+`main.c` here plus a few driver wrappers, with no changes to `core/`.
 
-## What goes here
+## main.c, roughly
 
-A `main.c` that does the same three things `board/host/main.c` does, with
-NXP RTD calls instead of the simulator:
+Same three steps as `board/host/main.c`, with NXP RTD calls instead of the
+simulator:
 
 ```c
+static vcu_t vcu;            // static, not on the stack: it's a few KB
+
+vcu_init(&vcu, NULL);
 for (;;) {
     vcu_in_t in = {0};
 
-    /* 1. sense */
-    in.now_ms    = OsIf_GetCounter(...);
-    in.apps1_mv  = adc_read_mv(APPS1_CH);      /* Adc_Sar_Ip_*   */
-    in.apps2_mv  = adc_read_mv(APPS2_CH);
-    in.brake1_mv = adc_read_mv(BRAKE1_CH);
-    in.brake2_mv = adc_read_mv(BRAKE2_CH);
+    in.now_ms      = ms_since_boot();
+    in.apps1_mv    = adc_read_mv(APPS1_CH);          // Adc_Sar_Ip_*
+    in.apps2_duty  = pwm_duty_x10(APPS2_CH);         // Emios_Icu_Ip_*
+    in.brake1_mv   = adc_read_mv(BRAKE1_CH);
+    in.brake2_mv   = adc_read_mv(BRAKE2_CH);
     in.shutdown_ok = Siul2_Dio_Ip_ReadPin(SDC_SENSE);
-    can_drain(&in);                            /* Flexcan_Ip_*   */
+    in.ts_request  = ...;
+    in.rtd_button  = ...;
+    can_fill_input(&in);                              // Flexcan_Ip_*
 
-    /* 2. decide */
     vcu_out_t out;
     vcu_step(&vcu, &in, &out);
 
-    /* 3. act */
     Siul2_Dio_Ip_WritePin(AIR_POS, out.air_pos);
-    can_send_torque(out.torque_cmd, out.inverter_enable);
+    ...
+    can_send(&out);
 
-    vTaskDelayUntil(&last, pdMS_TO_TICKS(1));
+    wait_for_next_ms();
 }
 ```
 
-Plus a low-priority task that calls `datalog_pop()` and writes the rows
-somewhere persistent. It is allowed to be slow — that is what the ring
-buffer is for.
+A separate low-priority task calls `datalog_pop()` and writes rows to SD or
+UART. It can be slow; that's what the ring buffer is for.
+
+## What the board owes the core
+
+- **APPS2 duty.** Convert the timer capture to 0.1 % duty (0..1000). If no
+  edge has been seen for a couple of PWM periods, report 0 if the line is
+  low and 1000 if it's high. Both are outside the valid window, so a dead
+  line becomes APPS_RANGE. Without this a stalled PWM input just holds its
+  last duty forever and looks fine.
+- **CAN per device per tick:** `rx` (a frame arrived since the last tick),
+  `counter` (its rolling counter) and `crc_ok` (checksum passed, computed
+  here with whatever algorithm that device uses). Don't work out a "valid"
+  flag here. Deciding whether a device is still trustworthy is
+  `core/sense/signals.c`'s job, so the tests can see it.
+- **`now_ms`** from a free-running timer, not a tick counter that can skip.
+- **`shutdown_ok`** is the SDC sense input. `core/` handles the sense point
+  being either before or after the VCU's own switch in the loop, but we
+  should still find out which it is.
 
 ## Things that will bite
 
-- **The IVT.** The S32K3 boot header is mandatory and is the classic
-  first-week wall. Read the reference manual's Boot chapter and AN14893
-  before anything else.
-- **ECC RAM must be initialised** before you touch it, or you take a fault on
-  the first read. SEGGER's S32K3xx wiki page covers this and debug
-  authentication better than the official docs.
-- **RTD is the non-AUTOSAR `*_Ip` APIs.** Those are the examples you want;
-  the AUTOSAR-flavoured ones are a different world.
-- **`can_drain()` owes the core three things per talker**: `rx`, `counter`
-  and `crc_ok`. Do not compute a `valid` flag out here — deciding whether a
-  signal is trustworthy is safety logic, and it lives in
-  `core/sense/signals.c` where a scenario test can reach it.
+- **The boot header (IVT)** is mandatory on the S32K3 and is the classic
+  first-week wall. Read the Boot chapter of the reference manual and AN14893
+  first.
+- **ECC RAM** has to be initialised before it's read, or the first read
+  faults. The startup code usually does this, check that it does.
+- **Use the non-AUTOSAR `*_Ip` RTD drivers.** Those are the ones the
+  examples use.
+- **uint32_t is `unsigned long` on arm-none-eabi**, so `%u` in printf is
+  wrong there. Use `PRIu32`. (`ctest` catches this in `core/`.)
 
-## Task rates
+## Task rate
 
-1 kHz safety (ADC, plausibility, watchdog) · 100 Hz control (torque, inverter
-TX) · 50 Hz state machine · 10 Hz housekeeping.
-
-Simplest correct arrangement: run the whole of `vcu_step()` at 1 kHz and only
-*transmit* at 100 Hz. One task owns the `vcu_t`, so nothing inside the core is
-ever shared and you need no locks in there at all. The safety task should own
-the shutdown GPIO directly so it can open the contactors even if everything
-else deadlocks.
+Run all of `vcu_step()` at 1 kHz in one task, and only transmit CAN at
+whatever rate the inverter wants. One task owning `vcu_t` means nothing in
+`core/` needs a lock. Put a hardware watchdog on that task.

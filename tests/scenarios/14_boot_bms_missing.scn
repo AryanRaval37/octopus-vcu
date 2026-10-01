@@ -1,0 +1,11 @@
+# The BMS never shows up. Waiting in INIT forever with no fault would hide
+# a real wiring problem, so after the boot grace period it becomes a
+# timeout like any other.
+
+t=0      bms_alive=0
+t=1500   expect_state=INIT expect_no_fault=BMS_TIMEOUT
+t=2100   expect_fault=BMS_TIMEOUT expect_state=FAULT
+
+# Asking for TS does nothing while it's missing.
+t=2500   ts=1
+t=3000   expect_state=FAULT expect_air_pos=0 expect_air_neg=0

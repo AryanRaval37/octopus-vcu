@@ -1,10 +1,8 @@
-# EV4.11.8: "The R2D mode must be left immediately when the SDC is opened."
+# EV4.11.8: "The ready-to-drive mode must be left immediately when the
+# shutdown circuit is opened."
 #
-# This was a real hole. The shutdown circuit was only consulted on the way
-# into precharge, so once the car was driving, the SDC could open and the
-# state machine would not notice. The inertia switch, the cockpit buttons
-# and the brake over-travel switch all live on that loop -- every one of
-# them is someone pressing "stop" and being ignored.
+# The inertia switch, the shutdown buttons and the BOTS are all on this
+# loop, so this is the path for someone hitting a stop button.
 
 t=0      expect_state=LV_READY
 t=100    ts=1
@@ -14,21 +12,32 @@ t=3300   brake=0
 t=3400   pedal=500
 t=3600   expect_torque_min=1 expect_enable=1
 
-# Somebody hits a shutdown button. No debounce on this one -- "immediately"
-# is the word the rule uses.
+# Someone hits a shutdown button. No debounce, "immediately" is the rule.
 t=4000   sdc=0
-t=4001   expect_fault=SDC_OPEN
-t=4010   expect_state=FAULT expect_torque_max=0 expect_enable=0
-
-# And the contactors open, because an open SDC drops the AIRs by definition.
+t=4001   expect_fault=SDC_OPEN expect_state=FAULT
+t=4010   expect_torque_max=0 expect_enable=0
 t=4020   expect_air_pos=0 expect_air_neg=0
 
-# Closing the circuit again must NOT restart the car on its own. EV4.11.4:
-# "Closing the SDC by any part defined in EV6.1.2 must not (re-)activate the
-# TS. Additional action must be required."
+# The loop is already open, so the VCU has no reason to hold its own
+# switch open too. (If it did, and the sense point is after that switch,
+# it would never see the loop close again.)
+t=4020   expect_sdc_assert=0
+
+# EV4.11.4: closing the loop again must not restart the TS by itself.
 t=5000   sdc=1
 t=6000   expect_state=FAULT
 
-# The additional action is the driver letting go of the TS request.
+# Open it again, and this time let go of TS while it's still open. That
+# must not get us out of FAULT: the loop is still open.
+t=6200   sdc=0
 t=6500   ts=0
-t=6700   expect_state=LV_READY
+t=7000   expect_state=FAULT expect_fault=SDC_OPEN
+
+# Close it. SDC_OPEN heals after 500 ms and we drop back to LV_READY.
+t=7200   sdc=1
+t=7600   expect_state=FAULT
+t=7800   expect_state=LV_READY expect_no_fault=SDC_OPEN
+
+# Asking again is the "additional action", and precharge starts.
+t=8000   ts=1
+t=8050   expect_state=PRECHARGE

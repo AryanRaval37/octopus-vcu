@@ -1,61 +1,56 @@
-/* faults.h — one table, one policy.
- *
- * The rule that keeps this from rotting: modules REPORT, they do not
- * DECIDE. Call fault_report(f, id, present) every tick and the fault
- * manager owns debounce, healing, latching and severity.
- *
- * The payoff is that "what does the car do if the BMS drops out?" has an
- * answer you can point at — one row in one table — instead of an answer you
- * have to reconstruct by grepping for BMS and reading every hit.
- */
+// faults.h - fault manager.
+//
+// Modules report whether a condition is true, every tick. This file decides
+// what that means: debounce, healing, latching and severity all come from
+// one table in faults.c.
+
 #ifndef VCU_FAULT_H
 #define VCU_FAULT_H
 
 #include "core/types.h"
 
 typedef struct {
-    fault_id_t  id;
     fault_sev_t sev;
-    uint16_t    debounce_ms;  // has to be present this long before it sets
-    uint16_t    heal_ms;      // and absent this long before it clears
-    bool        latching;     // if true, heal_ms never clears it
+    uint16_t    debounce_ms;  // present this long before it sets
+    uint16_t    heal_ms;      // absent this long before it clears
+    bool        latching;     // if set, only fault_acknowledge() clears it
     const char *name;
 } fault_def_t;
 
 typedef struct {
     fault_mask_t active;
-    uint16_t     present_ms[FAULT_COUNT];
+    uint16_t     present_ms[FAULT_COUNT]; // ? ms stored in uint16?
     uint16_t     absent_ms[FAULT_COUNT];
 
-    // Set for exactly one tick when a fault changes, so the logger can
-    // catch edges without polling everything every time.
+    // Bits that changed this tick, for the logger.
     fault_mask_t just_set;
     fault_mask_t just_cleared;
 } fault_mgr_t;
 
 void fault_init(fault_mgr_t *f);
 
-// Start a tick. Clears the edge flags.
+// Call at the start of every tick, clears the edge masks.
 void fault_begin(fault_mgr_t *f);
 
-// Is this condition true right now? Call it for every fault every tick — a
-// fault you stop reporting counts as absent, which is what you want when a
-// subsystem goes away entirely.
+// Report every fault every tick, false included. Healing only happens on
+// ticks where the fault is reported absent.
 void fault_report(fault_mgr_t *f, fault_id_t id, bool present, uint16_t dt_ms);
 
-// The driver says "I saw that". Clears latched faults whose cause has gone.
-// Non-latching faults heal by themselves and are untouched.
+// Driver acknowledged. Clears latched faults whose cause is gone.
 void fault_acknowledge(fault_mgr_t *f);
 
 const fault_def_t *fault_def(fault_id_t id);
 const char        *fault_name(fault_id_t id);
 
-// Worst severity currently active, or INFO when nothing is set.
+// Worst active severity (INFO if nothing is active).
 fault_sev_t fault_worst(const fault_mgr_t *f);
+
+// Same, only looking at the faults in `mask`.
+fault_sev_t fault_worst_in(const fault_mgr_t *f, fault_mask_t mask);
 
 static inline bool fault_is_set(const fault_mgr_t *f, fault_id_t id)
 {
     return (f->active & FAULT_BIT(id)) != 0;
 }
 
-#endif /* VCU_FAULT_H */
+#endif // VCU_FAULT_H

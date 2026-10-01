@@ -1,83 +1,107 @@
-// config.c — the numbers the car actually runs on.
+// config.c - the numbers the car runs on.
 //
-// Separated from the code that uses them so that "what is the car calibrated
-// to?" is a file you can open, not a struct you have to go hunting for.
+// Anything marked "placeholder" is a guess until we have the real part or
+// measurement. docs/need-from-team.md has the list of who to ask.
 
 #include "core/config.h"
 
 static const vcu_cfg_t DEFAULT_CFG = {
-    // ch1 rises 500 -> 4500 mV, ch2 falls 4500 -> 500 mV (T11.8.6).
-    .apps1_lo_mv = 500,  .apps1_hi_mv = 4500,
-    .apps2_lo_mv = 4500, .apps2_hi_mv = 500,
-    .apps_range_min_mv = 300, .apps_range_max_mv = 4700,
-    .apps_deviation_max = 100,   // 10.0 percentage points -- T11.8.9
-    .apps_deviation_ms  = 100,   // 100 ms                 -- T11.8.8
-    .apps_reset_below   = 50,    //  5.0 %
+    // APPS1 analog, rising 0.5 -> 4.5 V. APPS2 PWM, falling 90 % -> 10 %
+    // duty. Both placeholders until the pedal box is built and measured.
+    .apps1 = { .lo = 500, .hi = 4500, .min = 300, .max = 4700 },   // mV
+    .apps2 = { .lo = 900, .hi = 100,  .min = 50,  .max = 950  },   // 0.1 % duty
+    .apps_deviation_max = 100,   // 10.0 pp, T11.8.9
+    .apps_deviation_ms  = 100,   // T11.8.8
+    .apps_reset_below   = 50,
 
-    // Both brake channels rise. They are separate sensors on the same pedal,
-    // so unlike the accelerator there is no short-circuit argument for
-    // opposing slopes -- but they still get range-checked and compared.
-    .brake1_lo_mv = 500, .brake1_hi_mv = 4500,
-    .brake2_lo_mv = 500, .brake2_hi_mv = 4500,
-    .brake_range_min_mv = 300, .brake_range_max_mv = 4700,
-    .brake_deviation_max = 150,  // 15.0 pp -- looser than APPS on purpose:
-    .brake_deviation_ms  = 250,  // two sensors on one hydraulic pedal have
-                                 // more mechanical spread than one hall pair
-    .brake_applied_pct = 150,    // 15.0 %
+    .brake1 = { .lo = 500, .hi = 4500, .min = 300, .max = 4700 },
+    .brake2 = { .lo = 500, .hi = 4500, .min = 300, .max = 4700 },
+    // Looser than the APPS: two sensors on a hydraulic system have more
+    // spread between them than two on one pedal shaft.
+    .brake_deviation_max = 150,
+    .brake_deviation_ms  = 250,
+    .brake_reset_below   = 50,
+    .brake_applied_pct   = 150,
 
-    .bppc_apps_trip  = 250,      // 25.0 % -- historical value, see config.h
-    .bppc_apps_reset = 50,       //  5.0 %
+    .bppc_apps_trip  = 250,
+    .bppc_apps_reset = 50,
 
-    .precharge_target_pct  = 950, // 95.0 % of pack -- EV5.7.1
+    .precharge_target_pct  = 950,
     .precharge_timeout_ms  = 5000,
     .precharge_min_rise_ms = 500,
-    .precharge_min_rise_dv = 50,  // 5.0 V of movement proves the resistor
+    .precharge_min_rise_dv = 50,     // 5.0 V
 
-    .rtd_buzzer_ms = 1500,        // EV4.12.1 allows 1000..3000 ms
+    .rtd_buzzer_ms = 1500,
 
-    .torque_max           = 2000, // 200.0 Nm
-    .torque_regen_max     = 400,
-    .torque_rate_per_tick = 40,
-    .rpm_max        = 6000,
-    .regen_fade_rpm = 500,
-    .regen_soc_max  = 950,
+    .torque_max         = 2000,      // 200.0 Nm, placeholder
+    .torque_regen_max   = 400,
+    .torque_slew_per_ms = 40,        // 0 -> full torque in 50 ms
+    .rpm_max            = 6000,
+    .regen_fade_rpm     = 500,
+    .regen_soc_max      = 950,
 
-    .power_max_w = 80000,         // EV2.2.1
-    .current_max = 5000,          // 500.0 A -- EV2.2.2
+    .power_max_w      = 80000,
+    .current_max      = 5000,        // 500.0 A
+    .drive_efficiency = 900,         // placeholder, want the motor+inverter map
 
     .derate_motor_start = 90, .derate_motor_stop = 110,
     .derate_inv_start   = 70, .derate_inv_stop   = 85,
-    .cell_derate_mv = 3300,   // start easing off here
-    .cell_min_mv    = 3000,   // nothing left here
+    .cell_derate_mv = 3300,
+    .cell_min_mv    = 3000,
 
-    // Well inside the 500 ms that T11.9.4 allows. The inverter is tighter
-    // than the BMS because it is the one being told to make torque.
+    // The inverter is tighter because it's the one making torque.
     .bms_timeout_ms   = 200,
     .inv_timeout_ms   = 100,
     .counter_stall_ms = 300,
-};
 
-/* Catch a calibration that cannot possibly be right. These are the mistakes
- * that produce a car which drives -- badly, or briefly -- rather than one
- * that refuses to start, which makes them the expensive kind. */
-static bool cfg_sane(const vcu_cfg_t *c)
-{
-    return c->apps_deviation_max <= PCT_MAX
-        && c->apps_reset_below   <  PCT_MAX
-        && c->bppc_apps_reset    <  c->bppc_apps_trip
-        && c->precharge_target_pct <= PCT_MAX
-        && c->rtd_buzzer_ms >= 1000 && c->rtd_buzzer_ms <= 3000   // EV4.12.1
-        && c->derate_motor_start < c->derate_motor_stop
-        && c->derate_inv_start   < c->derate_inv_stop
-        && c->cell_min_mv        < c->cell_derate_mv
-        && c->torque_max > 0
-        && c->power_max_w > 0
-        && c->bms_timeout_ms <= 500 && c->inv_timeout_ms <= 500;  // T11.9.4
-}
+    .boot_grace_ms = 2000,
+};
 
 const vcu_cfg_t *vcu_cfg_default(void)
 {
-    // A bad calibration is worse than no calibration: it will drive. Refuse
-    // to hand one out rather than let the car run on it.
-    return cfg_sane(&DEFAULT_CFG) ? &DEFAULT_CFG : 0;
+    return &DEFAULT_CFG;
+}
+
+// Endpoints have to sit strictly inside the valid window, otherwise a fully
+// pressed (or fully released) pedal reads as a broken wire.
+static bool cal_ok(const sensor_cal_t *s)
+{
+    const uint16_t bottom = s->lo < s->hi ? s->lo : s->hi;
+    const uint16_t top    = s->lo < s->hi ? s->hi : s->lo;
+    return s->lo != s->hi && s->min < bottom && top < s->max;
+}
+
+bool vcu_cfg_valid(const vcu_cfg_t *c)
+{
+    if (!c) return false;
+
+    return cal_ok(&c->apps1) && cal_ok(&c->apps2)
+        && cal_ok(&c->brake1) && cal_ok(&c->brake2)
+
+        && c->apps_deviation_max <= PCT_MAX
+        && c->apps_deviation_ms  <= 100                 // T11.8.8
+        && c->apps_reset_below   <  PCT_MAX
+        && c->brake_deviation_max <= PCT_MAX
+        && c->brake_reset_below   <  PCT_MAX
+        && c->brake_applied_pct > 0 && c->brake_applied_pct < PCT_MAX
+        && c->bppc_apps_reset < c->bppc_apps_trip && c->bppc_apps_trip <= PCT_MAX
+
+        && c->precharge_target_pct >= 950 && c->precharge_target_pct <= PCT_MAX   // EV5.7.1
+        && c->precharge_min_rise_ms < c->precharge_timeout_ms
+        && c->rtd_buzzer_ms >= 1000 && c->rtd_buzzer_ms <= 3000                  // EV4.12.1
+
+        && c->torque_max > 0 && c->torque_regen_max >= 0 && c->torque_slew_per_ms > 0
+        && c->rpm_max > 0
+        && c->power_max_w > 0 && c->power_max_w <= 80000                         // EV2.2.1
+        && c->current_max > 0 && c->current_max <= 5000                          // EV2.2.2
+        && c->drive_efficiency > 0 && c->drive_efficiency <= PCT_MAX
+
+        && c->derate_motor_start < c->derate_motor_stop
+        && c->derate_inv_start   < c->derate_inv_stop
+        && c->cell_min_mv        < c->cell_derate_mv
+
+        && c->bms_timeout_ms > 0 && c->bms_timeout_ms <= 500                     // T11.9.4
+        && c->inv_timeout_ms > 0 && c->inv_timeout_ms <= 500
+        && c->counter_stall_ms > 0 && c->counter_stall_ms <= 500
+        && c->boot_grace_ms <= 10000;
 }

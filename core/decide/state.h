@@ -1,10 +1,9 @@
-/* state.h — the vehicle state machine, and the precharge sequencer.
- *
- * Precharge lives in here rather than in a module of its own because it is a
- * state, not a service. Every way out of it is a state transition, and
- * splitting it off would leave two pieces of code that have to agree about
- * one timer. They would stop agreeing.
- */
+// state.h - vehicle state machine, including the precharge sequence.
+//
+// Precharge is a state here rather than its own module because every way
+// out of it is a state transition, and two modules sharing one timer is
+// asking for them to disagree.
+
 #ifndef VCU_STATE_H
 #define VCU_STATE_H
 
@@ -15,28 +14,24 @@
 
 typedef struct {
     vcu_state_t state;
-    vcu_state_t prev;         // what we left, for one tick
+    vcu_state_t prev;         // state we came from
     bool        entered;      // true on the first tick in a state
     uint32_t    in_state_ms;
 
-    // precharge bookkeeping
     dv_t        pc_start_dv;
     bool        pc_rise_checked;
 
-    uint32_t    buzzer_ms;
+    bool        prev_rtd_button;
 } state_mgr_t;
 
 void state_init(state_mgr_t *s);
 
-// bms_ok / inv_ok come from core/sense/signals.h — "may I steer a car by
-// what this device last said?". Passed in rather than read from `in`,
-// because deciding that is sense's job and this file is decide.
+// bms_ok / inv_ok are sig_trustworthy() for each device.
 void state_step(state_mgr_t *s, const vcu_cfg_t *cfg, const vcu_in_t *in,
                 const pedals_t *pedals, fault_mgr_t *faults,
                 bool bms_ok, bool inv_ok, uint16_t dt_ms);
 
-// Contactors and buzzer fall out of the state plus a timer, so derive them
-// instead of storing them. One less thing that can disagree with itself.
-void state_outputs(const state_mgr_t *s, vcu_out_t *out);
+// Relays, buzzer and inverter enable for the current state.
+void state_outputs(const state_mgr_t *s, const vcu_cfg_t *cfg, vcu_out_t *out);
 
-#endif /* VCU_STATE_H */
+#endif // VCU_STATE_H

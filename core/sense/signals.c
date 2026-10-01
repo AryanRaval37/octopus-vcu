@@ -1,22 +1,12 @@
-/* signals.c — message health.
- *
- * T11.9.2.d asks for three defences on any digitally transmitted signal:
- * data corruption (checked by a checksum), and loss and delay of messages
- * (checked by timeouts). This file is those three, and nothing else.
- *
- * The reason it is worth a file of its own: a stale reading that still looks
- * sensible is more dangerous than a missing one. A pack voltage of 400 V is
- * a fine number right up until you learn it arrived four seconds ago.
- *
- * Next: core/sense/pedals.c.
- */
+// signals.c - message health.
+//
+// T11.9.2.d wants digitally transmitted signals protected against data
+// corruption (checksum) and loss and delay of messages (timeouts). The
+// rolling counter adds the case a timeout can't see: frames still arriving
+// but with the same old data in them. An old reading that still looks
+// sensible is worse than a missing one.
 #include "core/sense/signals.h"
-
-static uint16_t sat_add(uint16_t v, uint16_t d)
-{
-    uint32_t t = (uint32_t)v + d;
-    return (t > 0xFFFFu) ? 0xFFFFu : (uint16_t)t;
-}
+#include "core/util.h"   // sat_add
 
 void sig_init(sig_health_t *h)
 {
@@ -28,31 +18,31 @@ void sig_init(sig_health_t *h)
 void sig_step(sig_health_t *h, bool rx, uint8_t counter, bool crc_ok,
               uint16_t timeout_ms, uint16_t stall_ms, uint16_t dt_ms)
 {
-    const bool good = rx && crc_ok;
+    // Both clocks run every tick and get reset by the event they measure.
+    // An earlier version only advanced stall_ms on ticks where a frame
+    // arrived, which is fine when frames come every tick (the sim used to
+    // do that) but at a 100 ms frame period turned a 300 ms stall limit
+    // into 30 seconds.
+    h->age_ms   = sat_add(h->age_ms, dt_ms);
+    h->stall_ms = sat_add(h->stall_ms, dt_ms);
 
-    /* A corrupt frame is worse than no frame, so it does not refresh
-     * anything -- the age keeps climbing underneath it. That is deliberate,
-     * and it is why corruption needs no trip threshold of its own: a device
-     * babbling rubbish stops being trusted on exactly the same schedule as
-     * a device that went quiet. */
+    // A frame with a bad checksum is thrown away: it doesn't refresh the
+    // age, so a device sending garbage times out exactly like a silent one.
+    // The flag is only kept so the log can say why.
     if (rx) h->corrupt = !crc_ok;
 
-    if (good) {
-        /* The counter catches the failure a timeout cannot see: a gateway,
-         * buffer or sender that keeps replaying one good frame forever. The
-         * bus looks healthy and the data is frozen. */
-        if (h->seen && counter == h->last_counter) {
-            h->stall_ms = sat_add(h->stall_ms, dt_ms);
-        } else {
-            h->stall_ms = 0;
-        }
+    if (rx && crc_ok) {
+        // The counter catches a sender (or gateway) replaying the same frame
+        // forever. A timeout can't see that, the frames keep coming.
+        if (!h->seen || counter != h->last_counter) h->stall_ms = 0;
         h->last_counter = counter;
         h->age_ms = 0;
         h->seen   = true;
-    } else {
-        h->age_ms = sat_add(h->age_ms, dt_ms);
     }
 
-    h->timeout = !h->seen || (h->age_ms >= timeout_ms);
-    h->stale   = h->stall_ms >= stall_ms;
+    h->timeout = !h->seen || h->age_ms >= timeout_ms;
+
+    // Only call it stale while frames are still arriving. If they've
+    // stopped, that's a timeout, and reporting both just muddies the log.
+    h->stale = h->seen && !h->timeout && h->stall_ms >= stall_ms;
 }
